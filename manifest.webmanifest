@@ -1,9 +1,14 @@
 {
-  "name": "TRUE CHAT",
-  "short_name": "TRUE CHAT",
-  "start_url": "./index.html",
-  "display": "standalone",
-  "background_color": "#081225",
-  "theme_color": "#101a32",
-  "lang": "fr"
+"id": "./",
+"name": "TRUE CHAT",
+"short_name": "TRUE CHAT",
+"description": "TRUE CHAT — Discutez en privé avec vos proches.",
+"start_url": "./index.html",
+"scope": "./",
+"display": "standalone",
+"orientation": "portrait",
+"background_color": "#081225",
+"theme_color": "#101a32",
+"lang": "fr",
+"categories": ["social", "communication"]
 }
