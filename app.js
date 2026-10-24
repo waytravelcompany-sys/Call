@@ -17,6 +17,19 @@ let roomChannel = null;
 let authListener = null;
 let currentTab = 'chats';
 let selectedMedia = null;
+
+// WEBRTC VARIABLES
+let localStream = null;
+let peerConnection = null;
+let callChannel = null;
+let isVideoCall = true;
+const rtcConfig = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ]
+};
+
 const $show = (id, on) => {
   const el = $(id);
   if (el) el.hidden = !on;
@@ -91,6 +104,8 @@ function setAuthMode(isSignup) {
     username.required = signup;
     username.autocomplete = 'username';
   }
+  document.querySelectorAll('label[for="name"], label[for="username"]')
+    .forEach(label => { label.hidden = !signup; });
   if (password) {
     password.autocomplete = signup
       ? 'new-password'
@@ -208,10 +223,6 @@ async function loadProfile() {
     .maybeSingle();
   if (error) throw error;
   profile = data;
-  /*
-   * Le trigger SQL crée d'abord un username automatique.
-   * On tente de remplacer ce nom par celui choisi à l'inscription.
-   */
   const wantedUsername = me.user_metadata?.username;
   if (
     profile &&
@@ -247,6 +258,10 @@ function renderProfile() {
   const email = document.createElement('p');
   email.textContent = me?.email || '';
   box.append(name, username, email);
+  if ($('navAvatar')) {
+    $('navAvatar').textContent =
+      initials(profile.full_name || profile.username || '?');
+  }
   if ($('welcomeUser')) {
     $('welcomeUser').textContent =
       'Bienvenue, ' + (profile.full_name || profile.username || '');
@@ -320,10 +335,6 @@ $('searchForm')?.addEventListener('submit', async event => {
   const button = $('findUser');
   setBusy(button, true, 'Recherche...');
   try {
-    /*
-     * La table profiles ne contient pas nécessairement l'email.
-     * La recherche se fait donc sur username et full_name.
-     */
     const safeTerm = term.replace(/[,%()]/g, '');
     const { data, error } = await db
       .from('profiles')
@@ -380,41 +391,168 @@ async function startPrivateChat(otherId) {
     errorMessage(error);
   }
 }
-async function loadChats() {
-  if (!me || !db) return;
+let chatRows = [];
+let chatFilter = 'all';
+let chatQuery = '';
+const ICON_TICK =
+  '<svg class="tick" viewBox="0 0 20 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 9 4 4L17 3"/></svg>';
+const ICON_MIC =
+  '<svg class="mic" viewBox="3 1 18 22" fill="currentColor"><path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-6a3.5 3.5 0 0 0-7 0v6A3.5 3.5 0 0 0 12 15Zm6-3.5a1 1 0 0 0-2 0 4 4 0 0 1-8 0 1 1 0 0 0-2 0 6 6 0 0 0 5 5.9V20H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-2.6a6 6 0 0 0 5-5.9Z"/></svg>';
+function initials(name) {
+  const parts = String(name || '?').trim().split(/\s+/).filter(Boolean);
+  return ((parts[0]?.[0] || '?') + (parts[1]?.[0] || '')).toUpperCase();
+}
+function avatarColor(seed) {
+  let hue = 0;
+  for (const char of String(seed)) {
+    hue = (hue * 47 + char.charCodeAt(0) * 13) % 360;
+  }
+  return 'hsl(' + hue + ' 32% 32%)';
+}
+function formatChatTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const day = d => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const diff = Math.round((day(new Date()) - day(date)) / 86400000);
+  if (diff <= 0) {
+    return date.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  }
+  if (diff === 1) return 'Hier';
+  if (diff < 7) return date.toLocaleDateString('fr-FR', { weekday: 'long' });
+  return date.toLocaleDateString('fr-FR');
+}
+function previewOf(last) {
+  if (!last) return { text: '', voice: false };
+  if (last.deleted_at) return { text: 'Message supprimé', voice: false };
+  if (last.type === 'voice') return { text: 'Message vocal', voice: true };
+  if (last.type === 'image') return { text: 'Photo', voice: false };
+  if (last.type === 'video') return { text: 'Vidéo', voice: false };
+  if (last.type === 'file') return { text: 'Fichier', voice: false };
+  return { text: last.content || '', voice: false };
+}
+function renderChatList() {
   const box = $('chats');
   if (!box) return;
+  box.replaceChildren();
+  const groupCount = chatRows.filter(row => row.isGroup).length;
+  if ($('groupsCount')) {
+    $('groupsCount').textContent = groupCount ? String(groupCount) : '';
+  }
+  const rows = chatRows.filter(row => {
+    if (chatFilter === 'groups' && !row.isGroup) return false;
+    if (chatQuery && !row.name.toLowerCase().includes(chatQuery)) return false;
+    return true;
+  });
+  if (!rows.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty';
+    empty.textContent = chatRows.length
+      ? 'Aucune discussion ne correspond.'
+      : 'Aucune conversation. Recherchez une personne pour commencer.';
+    box.append(empty);
+    return;
+  }
+  rows.forEach(row => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'chat-row';
+    const avatar = document.createElement('span');
+    avatar.className = 'avatar';
+    avatar.style.background = avatarColor(row.name);
+    avatar.textContent = initials(row.name);
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = row.name;
+    const time = document.createElement('span');
+    time.className = 'time';
+    time.textContent = formatChatTime(row.time);
+    const msg = document.createElement('span');
+    msg.className = 'msg';
+    const preview = previewOf(row.last);
+    if (row.last && row.last.sender_id === me?.id && !row.last.deleted_at) {
+      msg.insertAdjacentHTML('beforeend', ICON_TICK);
+    }
+    if (preview.voice) {
+      msg.insertAdjacentHTML('beforeend', ICON_MIC);
+    }
+    const text = document.createElement('span');
+    text.className = 'txt';
+    text.textContent = preview.text;
+    msg.append(text);
+    item.append(avatar, name, time, msg);
+    item.onclick = () => openRoom(row.id);
+    box.append(item);
+  });
+}
+async function loadChats() {
+  if (!me || !db) return;
+  if (!$('chats')) return;
   const { data: memberships, error } = await db
     .from('conversation_members')
     .select('conversation_id, role')
     .eq('user_id', me.id)
     .limit(100);
   if (error) throw error;
-  box.replaceChildren();
-  if (!memberships?.length) {
-    box.textContent = 'Aucune conversation. Recherchez une personne pour commencer.';
-    return;
-  }
-  for (const membership of memberships) {
+  const rows = await Promise.all((memberships || []).map(async membership => {
+    const id = membership.conversation_id;
     const { data: conversation, error: conversationError } = await db
       .from('conversations')
       .select('id, title, is_group, created_at, last_message_at')
-      .eq('id', membership.conversation_id)
+      .eq('id', id)
       .maybeSingle();
     if (conversationError) {
       console.warn(conversationError.message);
-      continue;
+      return null;
     }
-    if (!conversation) continue;
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'item';
-    button.textContent = conversation.is_group
-      ? '👥 ' + (conversation.title || 'Groupe')
-      : '💬 Conversation privée';
-    button.onclick = () => openRoom(conversation.id);
-    box.append(button);
-  }
+    if (!conversation) return null;
+    let name = conversation.title ||
+      (conversation.is_group ? 'Groupe' : 'Conversation privée');
+    if (!conversation.is_group) {
+      try {
+        const { data: others } = await db
+          .from('conversation_members')
+          .select('user_id')
+          .eq('conversation_id', id)
+          .neq('user_id', me.id)
+          .limit(1);
+        const otherId = others?.[0]?.user_id;
+        if (otherId) {
+          const { data: other } = await db
+            .from('profiles')
+            .select('full_name, username')
+            .eq('id', otherId)
+            .maybeSingle();
+          if (other) name = other.full_name || other.username || name;
+        }
+      } catch (lookupError) {
+        console.warn(lookupError);
+      }
+    }
+    let last = null;
+    try {
+      const { data: latest } = await db
+        .from('messages')
+        .select('content, type, sender_id, created_at, deleted_at')
+        .eq('conversation_id', id)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      last = latest?.[0] || null;
+    } catch (lastError) {
+      console.warn(lastError);
+    }
+    return {
+      id,
+      name,
+      isGroup: Boolean(conversation.is_group),
+      last,
+      time: last?.created_at || conversation.last_message_at || conversation.created_at
+    };
+  }));
+  chatRows = rows
+    .filter(Boolean)
+    .sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
+  renderChatList();
 }
 $('refresh')?.addEventListener('click', async () => {
   try {
@@ -427,6 +565,7 @@ $('refresh')?.addEventListener('click', async () => {
   }
 });
 $('newConversation')?.addEventListener('click', () => {
+  showTab('chats');
   $('findEmail')?.focus();
   notify('Recherchez un nom d’utilisateur pour démarrer une conversation.');
 });
@@ -476,10 +615,20 @@ async function openRoom(id) {
     errorMessage(error);
     return;
   }
-  $('roomTitle').textContent =
+  const cached = chatRows.find(row => row.id === id);
+  const roomName = cached?.name ||
     data?.title || (data?.is_group ? 'Groupe' : 'Conversation privée');
-  await loadMessages();
-  subscribeToMessages();
+  $('roomTitle').textContent = roomName;
+  if ($('roomAvatar')) {
+    $('roomAvatar').textContent = initials(roomName);
+    $('roomAvatar').style.background = avatarColor(roomName);
+  }
+  try {
+    await loadMessages();
+    subscribeToMessages();
+  } catch (messageError) {
+    errorMessage(messageError);
+  }
 }
 $('back')?.addEventListener('click', async () => {
   room = null;
@@ -564,7 +713,10 @@ async function renderMessage(message, box) {
   }
   const time = document.createElement('small');
   time.textContent = message.created_at
-    ? new Date(message.created_at).toLocaleString('fr-FR')
+    ? new Date(message.created_at).toLocaleTimeString('fr-FR', {
+        hour: '2-digit',
+        minute: '2-digit'
+      })
     : '';
   bubble.append(time);
   box.append(bubble);
@@ -671,10 +823,6 @@ $('sendForm')?.addEventListener('submit', async event => {
       .from('messages')
       .insert(payload);
     if (error) {
-      /*
-       * Si la base refuse le message après le téléversement,
-       * on tente de supprimer le fichier qui vient d'être envoyé.
-       */
       if (mediaPath) {
         await db.storage.from('media').remove([mediaPath]);
       }
@@ -837,10 +985,22 @@ const tabTargets = {
   status: 'statusSection',
   calls: 'callsSection',
   contacts: 'contactsSection',
-  settings: 'settingsSection'
+  settings: 'settingsSection',
+  notifications: 'notificationsSection'
+};
+const tabTitles = {
+  chats: 'Discussions',
+  status: 'Actus',
+  calls: 'Appels',
+  contacts: 'Contacts',
+  settings: 'Vous',
+  notifications: 'Notifications'
 };
 function showTab(tab) {
   currentTab = tab;
+  if ($('pageTitle')) {
+    $('pageTitle').textContent = tabTitles[tab] || 'TRUE CHAT';
+  }
   Object.values(tabTargets).forEach(id => {
     $show(id, false);
   });
@@ -905,7 +1065,7 @@ async function loadContacts() {
   }
 }
 /* =====================================================
-   APPELS : HISTORIQUE UNIQUEMENT POUR LE MOMENT
+   APPELS : HISTORIQUE
 ===================================================== */
 async function loadCalls() {
   if (!me) return;
@@ -934,6 +1094,175 @@ async function loadCalls() {
     box.append(item);
   });
 }
+/* =====================================================
+   WEBRTC & SUPABASE REALTIME CALLING LOGIC
+===================================================== */
+async function getMediaStream(video = true) {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      video: video,
+      audio: true
+    });
+    const localVideo = $('localVideo');
+    if (localVideo) localVideo.srcObject = localStream;
+    return localStream;
+  } catch (error) {
+    console.error("Erreur média:", error);
+    notify("Impossible d'accéder à la caméra ou au microphone.");
+    throw error;
+  }
+}
+
+function createPeerConnection() {
+  peerConnection = new RTCPeerConnection(rtcConfig);
+
+  peerConnection.ontrack = event => {
+    const remoteVideo = $('remoteVideo');
+    if (remoteVideo && event.streams[0]) {
+      remoteVideo.srcObject = event.streams[0];
+    }
+  };
+
+  peerConnection.onicecandidate = event => {
+    if (event.candidate && callChannel) {
+      callChannel.send({
+        type: 'broadcast',
+        event: 'ice-candidate',
+        payload: { candidate: event.candidate, sender: me.id }
+      });
+    }
+  };
+
+  if (localStream) {
+    localStream.getTracks().forEach(track => {
+      peerConnection.addTrack(track, localStream);
+    });
+  }
+}
+
+async function initiateCall(withVideo = true) {
+  if (!room || !me) return;
+  isVideoCall = withVideo;
+
+  try {
+    await getMediaStream(isVideoCall);
+    $show('callModal', true);
+    $('callModalStatus').textContent = "Appel en cours...";
+    $show('acceptCallBtn', false);
+
+    setupCallChannel();
+    createPeerConnection();
+
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+
+    callChannel.send({
+      type: 'broadcast',
+      event: 'call-offer',
+      payload: { offer, sender: me.id, isVideo: isVideoCall }
+    });
+  } catch (error) {
+    endCall();
+  }
+}
+
+function setupCallChannel() {
+  if (callChannel) db.removeChannel(callChannel);
+
+  callChannel = db.channel('call-' + room)
+    .on('broadcast', { event: 'call-offer' }, async ({ payload }) => {
+      if (payload.sender === me.id) return;
+
+      $show('callModal', true);
+      $('callModalStatus').textContent = "Appel entrant...";
+      $show('acceptCallBtn', true);
+
+      window.pendingOffer = payload.offer;
+      isVideoCall = payload.isVideo;
+    })
+    .on('broadcast', { event: 'call-answer' }, async ({ payload }) => {
+      if (payload.sender === me.id) return;
+      if (peerConnection && payload.answer) {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(payload.answer));
+        $('callModalStatus').textContent = "En communication";
+      }
+    })
+    .on('broadcast', { event: 'ice-candidate' }, async ({ payload }) => {
+      if (payload.sender === me.id) return;
+      if (peerConnection && payload.candidate) {
+        try {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
+        } catch (e) {
+          console.warn("Erreur ICE Candidate:", e);
+        }
+      }
+    })
+    .on('broadcast', { event: 'end-call' }, () => {
+      notify("L'appel a pris fin.");
+      endCall();
+    })
+    .subscribe();
+}
+
+$('acceptCallBtn')?.addEventListener('click', async () => {
+  try {
+    $show('acceptCallBtn', false);
+    $('callModalStatus').textContent = "Connexion...";
+
+    await getMediaStream(isVideoCall);
+    createPeerConnection();
+
+    if (window.pendingOffer) {
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(window.pendingOffer));
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+
+      callChannel.send({
+        type: 'broadcast',
+        event: 'call-answer',
+        payload: { answer, sender: me.id }
+      });
+
+      $('callModalStatus').textContent = "En communication";
+    }
+  } catch (error) {
+    endCall();
+  }
+});
+
+function endCall() {
+  if (callChannel) {
+    callChannel.send({
+      type: 'broadcast',
+      event: 'end-call',
+      payload: { sender: me?.id }
+    });
+    db.removeChannel(callChannel);
+    callChannel = null;
+  }
+
+  if (peerConnection) {
+    peerConnection.close();
+    peerConnection = null;
+  }
+
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
+  }
+
+  $show('callModal', false);
+  const localVideo = $('localVideo');
+  const remoteVideo = $('remoteVideo');
+  if (localVideo) localVideo.srcObject = null;
+  if (remoteVideo) remoteVideo.srcObject = null;
+}
+
+$('endCallBtn')?.addEventListener('click', endCall);
+
+$('startAudioCall')?.addEventListener('click', () => initiateCall(false));
+$('startVideoCall')?.addEventListener('click', () => initiateCall(true));
+
 /* =====================================================
    PARAMÈTRES
 ===================================================== */
@@ -979,6 +1308,50 @@ $('settingsStorage')?.addEventListener('click', () => {
 });
 $('roomMenu')?.addEventListener('click', () => {
   notify('Les options avancées de conversation seront ajoutées ensuite.');
+});
+/* =====================================================
+   INTERFACE : MENU, FILTRES, RECHERCHE, CAMÉRA
+===================================================== */
+document.querySelectorAll('.chip[data-filter]').forEach(chip => {
+  chip.addEventListener('click', () => {
+    const filter = chip.dataset.filter;
+    if (filter === 'unread' || filter === 'favorites') {
+      notify('Cette option sera disponible prochainement.');
+      return;
+    }
+    chatFilter = filter;
+    document.querySelectorAll('.chip[data-filter]').forEach(other => {
+      other.classList.toggle('on', other === chip);
+    });
+    renderChatList();
+  });
+});
+$('archivedRow')?.addEventListener('click', () => {
+  notify('Les discussions archivées seront disponibles prochainement.');
+});
+$('cameraBtn')?.addEventListener('click', () => {
+  showTab('status');
+  $('statusMedia')?.click();
+});
+const menuSheet = $('menuSheet');
+$('menuBtn')?.addEventListener('click', event => {
+  event.stopPropagation();
+  if (menuSheet) menuSheet.hidden = !menuSheet.hidden;
+});
+menuSheet?.querySelectorAll('button').forEach(button => {
+  button.addEventListener('click', () => {
+    menuSheet.hidden = true;
+  });
+});
+document.addEventListener('click', event => {
+  if (menuSheet && !menuSheet.hidden && !menuSheet.contains(event.target)) {
+    menuSheet.hidden = true;
+  }
+});
+$('findEmail')?.addEventListener('input', () => {
+  chatQuery = $('findEmail').value.trim().toLowerCase();
+  renderChatList();
+  if (!chatQuery) $('found')?.replaceChildren();
 });
 /* =====================================================
    DÉMARRAGE
