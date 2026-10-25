@@ -3032,10 +3032,10 @@ $('avatarFile')?.addEventListener('change', async () => {
     const blob = await resizeImage(file, 512);
     const path = me.id + '/' + crypto.randomUUID() + '.jpg';
     const { error: uploadError } = await db.storage
-      .from('avatar')
+      .from('avatars')
       .upload(path, blob, { contentType: 'image/jpeg', upsert: false });
     if (uploadError) throw uploadError;
-    const { data: pub } = db.storage.from('avatar').getPublicUrl(path);
+    const { data: pub } = db.storage.from('avatars').getPublicUrl(path);
     const { data, error } = await db
       .from('profiles')
       .update({ avatar_url: pub.publicUrl })
