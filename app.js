@@ -961,11 +961,8 @@ async function renderMessage(message, box) {
             bubble.append(video);
             addSaveButton(bubble, data.signedUrl, message.media_name, 'video');
           } else if (message.type === 'voice') {
-            const audio = document.createElement('audio');
-            audio.src = data.signedUrl;
-            audio.controls = true;
-            audio.preload = 'metadata';
-            bubble.append(audio);
+            bubble.classList.add('voice-bubble');
+            bubble.append(buildVoicePlayer(message, data.signedUrl));
           } else {
             const link = document.createElement('a');
             link.href = data.signedUrl;
@@ -1029,6 +1026,238 @@ function subscribeToMessages() {
       }
     )
     .subscribe();
+}
+
+/* =====================================================
+   LECTEUR DE MESSAGE VOCAL (façon WhatsApp)
+   - forme d'onde réelle (décodée), point de progression, appui pour avancer
+   - micro vert = pas encore écouté, bleu = écouté
+   - vitesse 1× / 1.5× / 2× pendant la lecture
+===================================================== */
+const VOICE_BARS = 40;
+const SVG_PLAY = '<svg class="i-play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
+const SVG_PAUSE = '<svg class="i-pause" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4.2" height="14" rx="1.2"/><rect x="13.8" y="5" width="4.2" height="14" rx="1.2"/></svg>';
+const voiceState = { ctx: null, queue: Promise.resolve(), current: null, senders: new Map() };
+const voicePlayedKey = 'truechat.voicePlayed';
+function loadVoicePlayed() {
+  try { return new Set(JSON.parse(localStorage.getItem(voicePlayedKey) || '[]')); }
+  catch (error) { return new Set(); }
+}
+const voicePlayed = loadVoicePlayed();
+function markVoicePlayed(id) {
+  if (!id || voicePlayed.has(id)) return;
+  voicePlayed.add(id);
+  try { localStorage.setItem(voicePlayedKey, JSON.stringify([...voicePlayed].slice(-800))); } catch (error) {}
+}
+function voiceClock(seconds) {
+  const total = Math.max(0, Math.round(seconds || 0));
+  return Math.floor(total / 60) + ':' + String(total % 60).padStart(2, '0');
+}
+// Onde de secours (avant le décodage) : stable pour un même message
+function voiceFakeBars(seed) {
+  let h = 2166136261;
+  for (const ch of String(seed)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
+  const rnd = () => { h ^= h << 13; h ^= h >>> 17; h ^= h << 5; return ((h >>> 0) % 1000) / 1000; };
+  const out = [];
+  let prev = .5;
+  for (let i = 0; i < VOICE_BARS; i++) {
+    prev = prev * .45 + rnd() * .55;
+    out.push(Math.max(.16, Math.min(1, prev * 1.25)));
+  }
+  return out;
+}
+// Décode le fichier audio pour en tirer la vraie onde et la durée
+function decodeVoice(url) {
+  const job = voiceState.queue.then(async () => {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) throw new Error('AudioContext indisponible');
+    voiceState.ctx = voiceState.ctx || new Ctx();
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('Téléchargement impossible');
+    const data = await response.arrayBuffer();
+    const buffer = await new Promise((resolve, reject) => {
+      const p = voiceState.ctx.decodeAudioData(data, resolve, reject);
+      if (p && p.catch) p.catch(reject);
+    });
+    const channel = buffer.getChannelData(0);
+    const size = Math.max(1, Math.floor(channel.length / VOICE_BARS));
+    const bars = [];
+    for (let i = 0; i < VOICE_BARS; i++) {
+      let sum = 0;
+      const start = i * size;
+      const end = Math.min(channel.length, start + size);
+      const step = Math.max(1, Math.floor((end - start) / 400));
+      let n = 0;
+      for (let j = start; j < end; j += step) { sum += channel[j] * channel[j]; n++; }
+      bars.push(Math.sqrt(sum / Math.max(1, n)));
+    }
+    const peak = Math.max(...bars, 0.0001);
+    return {
+      duration: buffer.duration,
+      bars: bars.map(v => Math.max(.14, Math.min(1, Math.pow(v / peak, .7))))
+    };
+  });
+  voiceState.queue = job.catch(() => {});
+  return job;
+}
+function voiceSender(id) {
+  if (!id) return Promise.resolve(null);
+  if (!voiceState.senders.has(id)) {
+    voiceState.senders.set(id, (async () => {
+      try {
+        const { data } = await db.from('profiles')
+          .select('id, username, full_name, avatar_url').eq('id', id).maybeSingle();
+        return data || null;
+      } catch (error) { return null; }
+    })());
+  }
+  return voiceState.senders.get(id);
+}
+function buildVoicePlayer(message, url) {
+  const mine = message.sender_id === me?.id;
+  const wrap = document.createElement('div');
+  wrap.className = 'vm' + (mine ? ' mine' : '') + (!mine && !voicePlayed.has(message.id) ? ' new' : '');
+
+  const who = document.createElement('span');
+  who.className = 'vm-who';
+  const avatar = document.createElement('span');
+  avatar.className = 'avatar vm-av';
+  const mic = document.createElement('span');
+  mic.className = 'vm-mic';
+  mic.innerHTML = ICON_MIC;
+  who.append(avatar, mic);
+  if (mine) {
+    setAvatar(avatar, profile?.avatar_url, profile?.full_name || profile?.username || 'Moi');
+  } else {
+    setAvatar(avatar, null, '?');
+    voiceSender(message.sender_id).then(person => {
+      if (person) setAvatar(avatar, person.avatar_url, person.full_name || person.username || '?');
+    });
+  }
+
+  const play = document.createElement('button');
+  play.type = 'button';
+  play.className = 'vm-play';
+  play.setAttribute('aria-label', 'Lire le message vocal');
+  play.innerHTML = SVG_PLAY + SVG_PAUSE;
+
+  const main = document.createElement('div');
+  main.className = 'vm-main';
+  const track = document.createElement('div');
+  track.className = 'vm-track';
+  const bars = voiceFakeBars(message.id || url).map(value => {
+    const bar = document.createElement('i');
+    bar.style.height = Math.round(value * 100) + '%';
+    track.append(bar);
+    return bar;
+  });
+  const dot = document.createElement('span');
+  dot.className = 'vm-dot';
+  track.append(dot);
+  const label = document.createElement('div');
+  label.className = 'vm-dur';
+  label.textContent = '0:00';
+  main.append(track, label);
+
+  const speed = document.createElement('button');
+  speed.type = 'button';
+  speed.className = 'vm-speed';
+  speed.textContent = '1×';
+
+  wrap.append(who, play, main, speed);
+
+  const audio = new Audio();
+  audio.preload = 'metadata';
+  audio.src = url;
+  audio.setAttribute('playsinline', '');
+  let total = 0;
+  let raf = 0;
+  const rates = [1, 1.5, 2];
+  let rateIndex = 0;
+
+  const duration = () => total || (Number.isFinite(audio.duration) ? audio.duration : 0);
+  const paint = () => {
+    const d = duration();
+    const p = d ? Math.min(1, audio.currentTime / d) : 0;
+    const lit = Math.round(p * bars.length);
+    bars.forEach((bar, i) => bar.classList.toggle('on', i < lit));
+    dot.style.left = 'calc(' + (p * 100) + '% - ' + (p * 14) + 'px)';
+    label.textContent = voiceClock(audio.currentTime > 0.05 ? audio.currentTime : d);
+  };
+  const loop = () => {
+    paint();
+    if (!audio.paused) raf = requestAnimationFrame(loop);
+  };
+  const control = { pause: () => audio.pause() };
+
+  audio.addEventListener('loadedmetadata', paint);
+  audio.addEventListener('durationchange', paint);
+  audio.addEventListener('play', () => {
+    wrap.classList.add('playing');
+    play.setAttribute('aria-label', 'Mettre en pause');
+    voiceState.current = control;
+    if (!mine) {
+      markVoicePlayed(message.id);
+      wrap.classList.remove('new');
+    }
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(loop);
+  });
+  audio.addEventListener('pause', () => {
+    wrap.classList.remove('playing');
+    play.setAttribute('aria-label', 'Lire le message vocal');
+    paint();
+  });
+  audio.addEventListener('ended', () => {
+    audio.currentTime = 0;
+    wrap.classList.remove('playing');
+    paint();
+  });
+  play.addEventListener('click', async () => {
+    if (!audio.paused) { audio.pause(); return; }
+    if (voiceState.current && voiceState.current !== control) voiceState.current.pause();
+    try {
+      audio.playbackRate = rates[rateIndex];
+      await audio.play();
+    } catch (error) {
+      notify('Ntibishoboye gucurura iri jwi.');
+    }
+  });
+  speed.addEventListener('click', () => {
+    rateIndex = (rateIndex + 1) % rates.length;
+    audio.playbackRate = rates[rateIndex];
+    speed.textContent = (rates[rateIndex] === 1.5 ? '1.5' : rates[rateIndex]) + '×';
+  });
+
+  // appui / glissement sur l'onde pour avancer ou reculer
+  let seeking = false;
+  const seekTo = event => {
+    const d = duration();
+    if (!d) return;
+    const rect = track.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    audio.currentTime = ratio * d;
+    paint();
+  };
+  track.addEventListener('pointerdown', event => {
+    seeking = true;
+    try { track.setPointerCapture(event.pointerId); } catch (error) {}
+    seekTo(event);
+  });
+  track.addEventListener('pointermove', event => { if (seeking) seekTo(event); });
+  ['pointerup', 'pointercancel'].forEach(name =>
+    track.addEventListener(name, () => { seeking = false; }));
+
+  // vraie onde + durée exacte (les petits vocaux seulement)
+  label.textContent = voiceClock(0);
+  if (!message.media_size || message.media_size < 4 * 1024 * 1024) {
+    decodeVoice(url).then(result => {
+      total = result.duration;
+      result.bars.forEach((value, i) => { if (bars[i]) bars[i].style.height = Math.round(value * 100) + '%'; });
+      paint();
+    }).catch(() => {});
+  }
+  return wrap;
 }
 /* =====================================================
    ENVOI DE MESSAGES ET DE MÉDIAS
@@ -1133,8 +1362,70 @@ $('sendForm')?.addEventListener('submit', async event => {
 const MAX_VOICE_SECONDS = 600;
 const voice = {
   active: false, recorder: null, stream: null, chunks: [],
-  startedAt: 0, timer: null, send: false, room: null
+  startedAt: 0, timer: null, send: false, room: null,
+  ctx: null, analyser: null, levels: [], wave: null
 };
+// Onde en direct (barres qui défilent vers la gauche, comme WhatsApp)
+function startVoiceWave(stream) {
+  voice.levels = [];
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) {
+      voice.ctx = new Ctx();
+      if (voice.ctx.state === 'suspended') voice.ctx.resume().catch(() => {});
+      const source = voice.ctx.createMediaStreamSource(stream);
+      voice.analyser = voice.ctx.createAnalyser();
+      voice.analyser.fftSize = 512;
+      source.connect(voice.analyser);
+    }
+  } catch (error) {
+    voice.analyser = null;
+  }
+  const canvas = $('voiceWave');
+  if (!canvas) return;
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || 160;
+  const height = canvas.clientHeight || 36;
+  canvas.width = Math.round(width * ratio);
+  canvas.height = Math.round(height * ratio);
+  const g = canvas.getContext('2d');
+  const data = voice.analyser ? new Uint8Array(voice.analyser.fftSize) : null;
+  clearInterval(voice.wave);
+  voice.wave = setInterval(() => {
+    let level = 0;
+    if (data) {
+      voice.analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) { const v = (data[i] - 128) / 128; sum += v * v; }
+      level = Math.min(1, Math.sqrt(sum / data.length) * 4.5);
+    } else {
+      level = .15 + Math.random() * .35;
+    }
+    voice.levels.push(Math.max(.08, level));
+    const step = 5 * ratio;
+    const max = Math.floor(canvas.width / step);
+    if (voice.levels.length > max) voice.levels.splice(0, voice.levels.length - max);
+    g.clearRect(0, 0, canvas.width, canvas.height);
+    g.fillStyle = 'rgba(255,255,255,.9)';
+    const start = canvas.width - voice.levels.length * step;
+    voice.levels.forEach((value, i) => {
+      const barHeight = Math.max(3 * ratio, value * canvas.height * .9);
+      const x = start + i * step;
+      const y = (canvas.height - barHeight) / 2;
+      g.beginPath();
+      if (g.roundRect) g.roundRect(x, y, 3 * ratio, barHeight, 2 * ratio); else g.rect(x, y, 3 * ratio, barHeight);
+      g.fill();
+    });
+  }, 60);
+}
+function stopVoiceWave() {
+  clearInterval(voice.wave);
+  voice.wave = null;
+  voice.levels = [];
+  try { voice.ctx?.close(); } catch (error) {}
+  voice.ctx = null;
+  voice.analyser = null;
+}
 const setText = (id, text) => {
   const el = $(id);
   if (el) el.textContent = text;
@@ -1218,6 +1509,7 @@ async function startVoiceRecording() {
   $show('sendForm', false);
   $show('voiceBar', true);
   setText('voiceTime', '0:00');
+  startVoiceWave(stream);
   voice.timer = setInterval(() => {
     const seconds = Math.floor((Date.now() - voice.startedAt) / 1000);
     setText('voiceTime', formatClock(seconds));
@@ -1244,6 +1536,7 @@ async function handleVoiceStop(recorder) {
   voice.recorder = null;
   voice.stream = null;
   voice.chunks = [];
+  stopVoiceWave();
   $show('voiceBar', false);
   $show('sendForm', true);
   if (!send || !me || !voiceRoom) return;
@@ -2524,7 +2817,7 @@ function attachMessageActions(message, bubble) {
   if (prefs.starred[message.id]) bubble.classList.add('starred');
   let timer = null;
   const start = event => {
-    if (event.target.closest('audio, video, a, button')) return;
+    if (event.target.closest('audio, video, a, button, .vm-track')) return;
     clearTimeout(timer);
     timer = setTimeout(() => openMessageActions(message, bubble), 500);
   };
