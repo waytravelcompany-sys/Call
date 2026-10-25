@@ -18,18 +18,6 @@ let authListener = null;
 let currentTab = 'chats';
 let selectedMedia = null;
 
-// WEBRTC VARIABLES
-let localStream = null;
-let peerConnection = null;
-let callChannel = null;
-let isVideoCall = true;
-const rtcConfig = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' }
-  ]
-};
-
 const $show = (id, on) => {
   const el = $(id);
   if (el) el.hidden = !on;
@@ -63,12 +51,13 @@ function escapeHTML(value) {
 function setBusy(button, busy, text) {
   if (!button) return;
   if (busy) {
-    button.dataset.originalText = button.textContent;
+    button.dataset.originalHtml = button.innerHTML;
     button.textContent = text || 'Patientez...';
     button.disabled = true;
   } else {
-    button.textContent =
-      button.dataset.originalText || button.textContent;
+    if (button.dataset.originalHtml !== undefined) {
+      button.innerHTML = button.dataset.originalHtml;
+    }
     button.disabled = false;
   }
 }
@@ -304,6 +293,8 @@ async function initialize() {
     renderAuth();
     await loadChats();
     await loadNotifications();
+    await listenForIncomingCalls();
+    syncPushSubscription().catch(error => console.warn('Push:', error));
   } catch (error) {
     errorMessage(error);
   }
@@ -314,6 +305,8 @@ function renderAuth() {
   $show('room', false);
   $show('logout', Boolean(me));
   if (!me) {
+    stopCallServices();
+    cancelVoiceRecording();
     room = null;
     if (roomChannel && db) {
       db.removeChannel(roomChannel);
@@ -631,6 +624,7 @@ async function openRoom(id) {
   }
 }
 $('back')?.addEventListener('click', async () => {
+  cancelVoiceRecording();
   room = null;
   if (roomChannel && db) {
     await db.removeChannel(roomChannel);
@@ -662,9 +656,12 @@ async function loadMessages() {
   box.scrollTop = box.scrollHeight;
 }
 async function renderMessage(message, box) {
+  if (message.id && box.querySelector('[data-id="' + message.id + '"]')) return;
   const bubble = document.createElement('div');
   bubble.className =
     'bubble' + (message.sender_id === me.id ? ' mine' : '');
+  if (message.id) bubble.dataset.id = message.id;
+  box.append(bubble); // réservé tout de suite : évite les doublons et garde l'ordre
   if (message.deleted_at) {
     bubble.textContent = 'Ce message a été supprimé.';
   } else {
@@ -698,6 +695,12 @@ async function renderMessage(message, box) {
             video.controls = true;
             video.playsInline = true;
             bubble.append(video);
+          } else if (message.type === 'voice') {
+            const audio = document.createElement('audio');
+            audio.src = data.signedUrl;
+            audio.controls = true;
+            audio.preload = 'metadata';
+            bubble.append(audio);
           } else {
             const link = document.createElement('a');
             link.href = data.signedUrl;
@@ -719,7 +722,6 @@ async function renderMessage(message, box) {
       })
     : '';
   bubble.append(time);
-  box.append(bubble);
 }
 function subscribeToMessages() {
   if (!room || !db) return;
@@ -771,14 +773,14 @@ $('sendForm')?.addEventListener('submit', async event => {
   const file = selectedMedia;
   const button = $('sendForm').querySelector('button[type="submit"]');
   if (!text && !file) {
-    notify('Écrivez un message ou choisissez un fichier.');
+    startVoiceRecording();
     return;
   }
   if (file && file.size > 25 * 1024 * 1024) {
     notify('Le fichier dépasse la limite de 25 Mo.');
     return;
   }
-  setBusy(button, true, 'Envoi...');
+  setBusy(button, true, '…');
   try {
     let mediaPath = null;
     let mediaName = null;
@@ -832,6 +834,8 @@ $('sendForm')?.addEventListener('submit', async event => {
     $('attachment').value = '';
     $('selectedFile').textContent = '';
     selectedMedia = null;
+    if ($('cameraInput')) $('cameraInput').value = '';
+    updateComposerMode();
     await loadMessages();
   } catch (error) {
     errorMessage(error);
@@ -839,6 +843,172 @@ $('sendForm')?.addEventListener('submit', async event => {
     setBusy(button, false);
   }
 });
+/* =====================================================
+   COMPOSER : MICRO / ENVOI + MESSAGES VOCAUX (MediaRecorder)
+===================================================== */
+const MAX_VOICE_SECONDS = 600;
+const voice = {
+  active: false, recorder: null, stream: null, chunks: [],
+  startedAt: 0, timer: null, send: false, room: null
+};
+const setText = (id, text) => {
+  const el = $(id);
+  if (el) el.textContent = text;
+};
+const formatClock = seconds =>
+  Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+
+// Le bouton rond affiche un micro quand il n'y a rien à envoyer, sinon « envoyer »
+function updateComposerMode() {
+  const form = $('sendForm');
+  if (!form) return;
+  const hasContent = Boolean($('messageText')?.value.trim()) || Boolean(selectedMedia);
+  form.classList.toggle('has-content', hasContent);
+  $('sendBtn')?.setAttribute(
+    'aria-label',
+    hasContent ? 'Envoyer' : 'Enregistrer un message vocal'
+  );
+}
+$('messageText')?.addEventListener('input', updateComposerMode);
+$('attachment')?.addEventListener('change', updateComposerMode);
+$('cameraInput')?.addEventListener('change', () => {
+  selectedMedia = $('cameraInput').files?.[0] || null;
+  setText('selectedFile', selectedMedia
+    ? selectedMedia.name + ' — prêt à être envoyé avec votre message'
+    : '');
+  updateComposerMode();
+});
+
+// iPhone/Safari enregistre en MP4 (AAC) ; on le préfère car il se lit partout.
+function pickAudioMime() {
+  if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return '';
+  return [
+    'audio/mp4;codecs=mp4a.40.2',
+    'audio/mp4',
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/ogg;codecs=opus'
+  ].find(type => MediaRecorder.isTypeSupported(type)) || '';
+}
+
+// Appelée directement depuis un geste de l'utilisateur (requis par iOS)
+async function startVoiceRecording() {
+  if (voice.active) return;
+  if (!room || !me) {
+    notify('Ouvrez une conversation avant d’enregistrer un message vocal.');
+    return;
+  }
+  if (currentCall) {
+    notify("Hari umuhamagaro urimo gukorwa.");
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+    notify("Iki gikoresho ntikibasha gufata amajwi.");
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (error) {
+    console.error('Micro:', error);
+    notify("Ntibyashoboka kubona uruhusha rwa microphone.");
+    return;
+  }
+  try {
+    const mime = pickAudioMime();
+    const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    voice.stream = stream;
+    voice.recorder = recorder;
+    voice.chunks = [];
+    voice.send = false;
+    voice.room = room;
+    voice.startedAt = Date.now();
+    voice.active = true;
+    recorder.ondataavailable = event => {
+      if (event.data && event.data.size) voice.chunks.push(event.data);
+    };
+    recorder.onstop = () => handleVoiceStop(recorder);
+    recorder.start(1000);
+  } catch (error) {
+    stream.getTracks().forEach(track => track.stop());
+    voice.active = false;
+    errorMessage(error);
+    return;
+  }
+  $show('sendForm', false);
+  $show('voiceBar', true);
+  setText('voiceTime', '0:00');
+  voice.timer = setInterval(() => {
+    const seconds = Math.floor((Date.now() - voice.startedAt) / 1000);
+    setText('voiceTime', formatClock(seconds));
+    if (seconds >= MAX_VOICE_SECONDS) stopVoiceRecording(true);
+  }, 250);
+}
+
+function stopVoiceRecording(send) {
+  if (!voice.active || !voice.recorder) return;
+  voice.send = Boolean(send);
+  clearInterval(voice.timer);
+  voice.timer = null;
+  if (voice.recorder.state !== 'inactive') voice.recorder.stop();
+  else handleVoiceStop(voice.recorder);
+}
+function cancelVoiceRecording() {
+  stopVoiceRecording(false);
+}
+
+async function handleVoiceStop(recorder) {
+  const { send, chunks, startedAt, room: voiceRoom, stream } = voice;
+  stream?.getTracks().forEach(track => track.stop());
+  voice.active = false;
+  voice.recorder = null;
+  voice.stream = null;
+  voice.chunks = [];
+  $show('voiceBar', false);
+  $show('sendForm', true);
+  if (!send || !me || !voiceRoom) return;
+
+  if ((Date.now() - startedAt) / 1000 < 1 || !chunks.length) {
+    notify('Message vocal trop court.');
+    return;
+  }
+  const mime = (recorder.mimeType || 'audio/webm').split(';')[0];
+  const extension = mime.includes('mp4') ? 'm4a'
+    : mime.includes('ogg') ? 'ogg'
+    : mime.includes('mpeg') ? 'mp3'
+    : 'webm';
+  const blob = new Blob(chunks, { type: mime });
+  if (blob.size > 25 * 1024 * 1024) {
+    notify('Le message vocal dépasse la limite de 25 Mo.');
+    return;
+  }
+  const path = voiceRoom + '/' + crypto.randomUUID() + '.' + extension;
+  try {
+    const { error: uploadError } = await db.storage
+      .from('media')
+      .upload(path, blob, { contentType: mime, upsert: false });
+    if (uploadError) throw uploadError;
+    const { error } = await db.from('messages').insert({
+      conversation_id: voiceRoom,
+      sender_id: me.id,
+      content: null,
+      type: 'voice',
+      media_path: path,
+      media_name: 'Message vocal',
+      media_size: blob.size
+    });
+    if (error) {
+      await db.storage.from('media').remove([path]);
+      throw error;
+    }
+    if (room === voiceRoom) await loadMessages();
+  } catch (error) {
+    errorMessage(error);
+  }
+}
+
+$('voiceCancel')?.addEventListener('click', () => stopVoiceRecording(false));
+$('voiceSend')?.addEventListener('click', () => stopVoiceRecording(true));
 /* =====================================================
    STATUTS : TEXTE, IMAGE OU VIDÉO
 ===================================================== */
@@ -1095,157 +1265,485 @@ async function loadCalls() {
   });
 }
 /* =====================================================
-   WEBRTC & SUPABASE REALTIME CALLING LOGIC
+   APPELS AUDIO / VIDÉO — WebRTC + Supabase Realtime
+   (signalisation : broadcast ; état de l'appel : table 'calls')
 ===================================================== */
-async function getMediaStream(video = true) {
+let localStream = null;
+let peerConnection = null;
+let callChannel = null;
+let isVideoCall = true;
+// STUN seul = repli (marche en Wi-Fi). Les identifiants TURN viennent de l'Edge
+// Function « turn-credentials » (voir SETUP.md) pour que les appels passent
+// aussi sur les réseaux mobiles.
+const STUN_ONLY = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' }
+];
+const rtcConfig = { iceServers: STUN_ONLY };
+let cachedIceServers = null;
+let cachedIceAt = 0;
+
+async function loadIceServers() {
+  if (cachedIceServers && Date.now() - cachedIceAt < 30 * 60 * 1000) return cachedIceServers;
+  try {
+    const result = await Promise.race([
+      db.functions.invoke('turn-credentials'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000))
+    ]);
+    const list = result?.data?.iceServers;
+    if (!result?.error && Array.isArray(list) && list.length) {
+      cachedIceServers = [...list, ...STUN_ONLY];
+      cachedIceAt = Date.now();
+      return cachedIceServers;
+    }
+    console.warn('TURN indisponible, STUN seulement :', result?.error);
+  } catch (error) {
+    console.warn('TURN indisponible, STUN seulement :', error);
+  }
+  return STUN_ONLY;
+}
+
+let currentCall = null;        // ligne de la table 'calls' en cours
+let callRingTimer = null;      // minuteur de 30 s (appel manqué)
+let micMuted = false;
+let camDisabled = false;
+let incomingCallsChannel = null;
+let incomingCallsUser = null;
+let pendingOffer = null;       // offre reçue, en attente d'acceptation
+let pendingCandidates = [];    // candidats ICE reçus trop tôt
+let offerSent = false;
+let wantAnswer = false;        // l'utilisateur a accepté avant l'arrivée de l'offre
+let callStartedAt = null;
+let callEnding = false;
+
+const isCaller = () => Boolean(currentCall && me && currentCall.caller_id === me.id);
+
+function sendBroadcast(event, extra = {}) {
+  if (!callChannel || !me) return Promise.resolve();
+  return callChannel.send({
+    type: 'broadcast',
+    event,
+    payload: { sender: me.id, ...extra }
+  });
+}
+
+/* ---------- Minuteur : appel manqué après 30 secondes ---------- */
+function startRingingTimer() {
+  clearRingingTimer();
+  callRingTimer = setTimeout(async () => {
+    if (!currentCall || currentCall.status !== 'ringing') return;
+    const callId = currentCall.id;
+    try {
+      await db.from('calls').update({
+        status: 'missed',
+        ended_at: new Date().toISOString()
+      }).eq('id', callId).eq('status', 'ringing');
+    } catch (error) {
+      console.warn('Missed call update:', error);
+    }
+    notify("Umuhamagaro ntiwitabiriwe (Missed call).");
+    endCallUI();
+  }, 30000);
+}
+
+function clearRingingTimer() {
+  if (callRingTimer) {
+    clearTimeout(callRingTimer);
+    callRingTimer = null;
+  }
+}
+
+/* ---------- 1. Microphone / caméra ---------- */
+async function getMediaStream(withVideo = false) {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
-      video: video,
-      audio: true
+      audio: true,
+      video: withVideo
     });
     const localVideo = $('localVideo');
     if (localVideo) localVideo.srcObject = localStream;
     return localStream;
   } catch (error) {
-    console.error("Erreur média:", error);
-    notify("Impossible d'accéder à la caméra ou au microphone.");
+    console.error('Erreur media:', error);
+    notify("Ntibyashoboka kubona uruhusha rwa kamera cyangwa microphone.");
     throw error;
   }
 }
 
+/* ---------- 2. RTCPeerConnection ---------- */
 function createPeerConnection() {
-  peerConnection = new RTCPeerConnection(rtcConfig);
+  if (peerConnection) peerConnection.close();
+  const pc = new RTCPeerConnection(rtcConfig);
+  peerConnection = pc;
 
-  peerConnection.ontrack = event => {
+  pc.ontrack = event => {
     const remoteVideo = $('remoteVideo');
     if (remoteVideo && event.streams[0]) {
       remoteVideo.srcObject = event.streams[0];
+      remoteVideo.play?.().catch(() => {});
     }
   };
 
-  peerConnection.onicecandidate = event => {
-    if (event.candidate && callChannel) {
-      callChannel.send({
-        type: 'broadcast',
-        event: 'ice-candidate',
-        payload: { candidate: event.candidate, sender: me.id }
-      });
+  pc.onicecandidate = event => {
+    if (event.candidate) {
+      sendBroadcast('ice-candidate', { candidate: event.candidate.toJSON() })
+        .catch(error => console.warn('ICE send:', error));
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc !== peerConnection) return;
+    if (pc.connectionState === 'connected') {
+      if (!callStartedAt) callStartedAt = Date.now();
+      $('callModalStatus').textContent = "Muri kuvugana";
+    } else if (pc.connectionState === 'failed') {
+      notify("Guhuza byanze. Ongera ugerageze.");
+      endCall();
     }
   };
 
   if (localStream) {
-    localStream.getTracks().forEach(track => {
-      peerConnection.addTrack(track, localStream);
-    });
+    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
   }
 }
 
-async function initiateCall(withVideo = true) {
+async function flushCandidates() {
+  const list = pendingCandidates;
+  pendingCandidates = [];
+  for (const candidate of list) {
+    try {
+      await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (error) {
+      console.warn('Erreur ICE Candidate:', error);
+    }
+  }
+}
+
+/* ---------- 3. Démarrer un appel (appelant) ---------- */
+async function initiateCall(withVideo = false) {
   if (!room || !me) return;
+  if (currentCall) {
+    notify("Hari umuhamagaro urimo gukorwa.");
+    return;
+  }
   isVideoCall = withVideo;
+  cancelVoiceRecording();
+  loadIceServers(); // préchauffe les identifiants TURN
 
   try {
+    // A. Trouver l'autre membre de la conversation
+    const { data: members, error: memberError } = await db
+      .from('conversation_members')
+      .select('user_id')
+      .eq('conversation_id', room)
+      .neq('user_id', me.id)
+      .limit(1);
+    if (memberError) throw memberError;
+
+    const calleeId = members?.[0]?.user_id;
+    if (!calleeId) {
+      notify("Ntihabonetse uwundi mukoresha muri iki kiganiro.");
+      return;
+    }
+
+    // B. Micro/caméra AVANT de créer l'appel (sinon l'autre sonne pour rien)
     await getMediaStream(isVideoCall);
+
+    // C. Écrire l'appel dans la table 'calls' (status: ringing)
+    const { data: callData, error: callError } = await db
+      .from('calls')
+      .insert({
+        conversation_id: room,
+        caller_id: me.id,
+        callee_id: calleeId,
+        type: withVideo ? 'video' : 'audio',
+        status: 'ringing'
+      })
+      .select()
+      .single();
+    if (callError) throw callError;
+    currentCall = callData;
+    offerSent = false;
+
+    // D. Interface
     $show('callModal', true);
-    $('callModalStatus').textContent = "Appel en cours...";
+    $show('videoContainer', isVideoCall);
+    $show('toggleCamBtn', isVideoCall);
     $show('acceptCallBtn', false);
+    $('callModalTitle').textContent =
+      $('roomTitle')?.textContent || (isVideoCall ? "Video Call" : "Audio Call");
+    $('callModalStatus').textContent = "Iri kuhamagara...";
+    if ($('callModalAvatar') && $('roomAvatar')) {
+      $('callModalAvatar').style.background = $('roomAvatar').style.background;
+      $('callModalAvatar').textContent = $('roomAvatar').textContent;
+    }
 
-    setupCallChannel();
+    // E. Canal de signalisation : l'offre part quand l'autre est prêt
+    setupCallChannel(currentCall.id);
+    startRingingTimer();
+  } catch (error) {
+    errorMessage(error);
+    if (currentCall) await endCall(); else endCallUI();
+  }
+}
+
+async function sendOffer() {
+  if (!currentCall || offerSent || !callChannel) return;
+  offerSent = true;
+  try {
+    rtcConfig.iceServers = await loadIceServers();
     createPeerConnection();
-
     const offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
-
-    callChannel.send({
-      type: 'broadcast',
-      event: 'call-offer',
-      payload: { offer, sender: me.id, isVideo: isVideoCall }
+    await sendBroadcast('call-offer', {
+      offer: { type: offer.type, sdp: offer.sdp },
+      isVideo: isVideoCall,
+      callId: currentCall.id
     });
   } catch (error) {
+    errorMessage(error);
     endCall();
   }
 }
 
-function setupCallChannel() {
+/* ---------- 4. Canal de l'appel (Realtime Broadcast) ---------- */
+function setupCallChannel(callId) {
   if (callChannel) db.removeChannel(callChannel);
+  pendingOffer = null;
+  pendingCandidates = [];
+  wantAnswer = false;
 
-  callChannel = db.channel('call-' + room)
-    .on('broadcast', { event: 'call-offer' }, async ({ payload }) => {
+  callChannel = db.channel('call-' + callId)
+    // poignée de main : celui qui s'abonne en second déclenche l'autre
+    .on('broadcast', { event: 'caller-hello' }, ({ payload }) => {
+      if (payload.sender === me.id || isCaller()) return;
+      sendBroadcast('callee-ready').catch(() => {});
+    })
+    .on('broadcast', { event: 'callee-ready' }, ({ payload }) => {
+      if (payload.sender === me.id || !isCaller()) return;
+      sendOffer();
+    })
+    .on('broadcast', { event: 'call-offer' }, ({ payload }) => {
       if (payload.sender === me.id) return;
-
-      $show('callModal', true);
-      $('callModalStatus').textContent = "Appel entrant...";
-      $show('acceptCallBtn', true);
-
-      window.pendingOffer = payload.offer;
-      isVideoCall = payload.isVideo;
+      pendingOffer = payload.offer;
+      if (typeof payload.isVideo === 'boolean') isVideoCall = payload.isVideo;
+      if (wantAnswer) answerOffer().catch(error => { errorMessage(error); endCall(); });
     })
     .on('broadcast', { event: 'call-answer' }, async ({ payload }) => {
       if (payload.sender === me.id) return;
-      if (peerConnection && payload.answer) {
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(payload.answer));
-        $('callModalStatus').textContent = "En communication";
-      }
-    })
-    .on('broadcast', { event: 'ice-candidate' }, async ({ payload }) => {
-      if (payload.sender === me.id) return;
-      if (peerConnection && payload.candidate) {
+      clearRingingTimer();
+      if (peerConnection && payload.answer && peerConnection.signalingState === 'have-local-offer') {
         try {
-          await peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
-        } catch (e) {
-          console.warn("Erreur ICE Candidate:", e);
+          await peerConnection.setRemoteDescription(new RTCSessionDescription(payload.answer));
+          await flushCandidates();
+          if (currentCall) currentCall.status = 'accepted';
+          if (!callStartedAt) callStartedAt = Date.now();
+          $('callModalStatus').textContent = "Muri kuvugana";
+        } catch (error) {
+          errorMessage(error);
+          endCall();
         }
       }
     })
-    .on('broadcast', { event: 'end-call' }, () => {
-      notify("L'appel a pris fin.");
-      endCall();
+    .on('broadcast', { event: 'ice-candidate' }, async ({ payload }) => {
+      if (payload.sender === me.id || !payload.candidate) return;
+      if (peerConnection && peerConnection.remoteDescription) {
+        try {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
+        } catch (error) {
+          console.warn('Erreur ICE Candidate:', error);
+        }
+      } else {
+        pendingCandidates.push(payload.candidate);
+      }
     })
+    .on('broadcast', { event: 'end-call' }, ({ payload }) => {
+      if (payload.sender === me.id || !currentCall) return;
+      notify("Umuhamagaro warangiye.");
+      endCallUI();
+    })
+    .subscribe(status => {
+      if (status !== 'SUBSCRIBED') return;
+      sendBroadcast(isCaller() ? 'caller-hello' : 'callee-ready').catch(() => {});
+    });
+}
+
+/* ---------- 5. Appels entrants (Realtime Postgres Changes) ---------- */
+async function onIncomingCall(payload) {
+  const call = payload.new;
+  if (!call || call.status !== 'ringing') return;
+
+  // Déjà en communication : refuser automatiquement (occupé)
+  if (currentCall) {
+    await db.from('calls').update({
+      status: 'declined',
+      ended_at: new Date().toISOString()
+    }).eq('id', call.id).eq('status', 'ringing');
+    return;
+  }
+
+  currentCall = call;
+  isVideoCall = call.type === 'video';
+  offerSent = false;
+  cancelVoiceRecording();
+  loadIceServers();
+
+  $show('callModal', true);
+  $show('acceptCallBtn', true);
+  $show('videoContainer', isVideoCall);
+  $show('toggleCamBtn', isVideoCall);
+  $('callModalTitle').textContent = "Umuhamagaro";
+  $('callModalStatus').textContent = isVideoCall
+    ? "Umuhamagaro wa Video uje..."
+    : "Umuhamagaro w'Amajwi uje...";
+
+  setupCallChannel(call.id);
+  startRingingTimer();
+
+  // Nom et avatar de l'appelant
+  const { data: callerProfile } = await db
+    .from('profiles')
+    .select('full_name, username, avatar_url')
+    .eq('id', call.caller_id)
+    .maybeSingle();
+  if (!currentCall || currentCall.id !== call.id) return;
+
+  const callerName = callerProfile?.full_name || callerProfile?.username || "Umuhamagaro";
+  $('callModalTitle').textContent = callerName;
+  if ($('callModalAvatar') && typeof setAvatar === 'function') {
+    setAvatar($('callModalAvatar'), callerProfile?.avatar_url, callerName);
+  }
+}
+
+function onCallUpdate(payload) {
+  const updated = payload.new;
+  if (!updated || !currentCall || currentCall.id !== updated.id) return;
+  currentCall = { ...currentCall, ...updated };
+  if (['ended', 'declined', 'missed'].includes(updated.status)) {
+    notify("Umuhamagaro warangiye (" + updated.status + ")");
+    endCallUI();
+  }
+}
+
+async function listenForIncomingCalls() {
+  if (!me || !db) return;
+  if (incomingCallsChannel && incomingCallsUser === me.id) return; // déjà à l'écoute
+  if (incomingCallsChannel) await db.removeChannel(incomingCallsChannel);
+  incomingCallsUser = me.id;
+
+  const table = { schema: 'public', table: 'calls' };
+  incomingCallsChannel = db.channel('global-calls-' + me.id)
+    .on('postgres_changes', { event: 'INSERT', ...table, filter: 'callee_id=eq.' + me.id }, onIncomingCall)
+    .on('postgres_changes', { event: 'UPDATE', ...table, filter: 'callee_id=eq.' + me.id }, onCallUpdate)
+    .on('postgres_changes', { event: 'UPDATE', ...table, filter: 'caller_id=eq.' + me.id }, onCallUpdate)
     .subscribe();
 }
 
+function stopCallServices() {
+  endCallUI();
+  if (incomingCallsChannel && db) db.removeChannel(incomingCallsChannel);
+  incomingCallsChannel = null;
+  incomingCallsUser = null;
+}
+
+/* ---------- 6. Accepter (appelé) ---------- */
+async function answerOffer() {
+  if (!pendingOffer || !currentCall || !callChannel) return;
+  const offer = pendingOffer;
+  pendingOffer = null;
+  rtcConfig.iceServers = await loadIceServers();
+  createPeerConnection();
+  await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+  await flushCandidates();
+  const answer = await peerConnection.createAnswer();
+  await peerConnection.setLocalDescription(answer);
+  await sendBroadcast('call-answer', { answer: { type: answer.type, sdp: answer.sdp } });
+  if (!callStartedAt) callStartedAt = Date.now();
+  $('callModalStatus').textContent = "Muri kuvugana";
+}
+
 $('acceptCallBtn')?.addEventListener('click', async () => {
+  if (!currentCall) return;
   try {
+    clearRingingTimer();
     $show('acceptCallBtn', false);
-    $('callModalStatus').textContent = "Connexion...";
+    $('callModalStatus').textContent = "Guhuza...";
 
     await getMediaStream(isVideoCall);
-    createPeerConnection();
 
-    if (window.pendingOffer) {
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(window.pendingOffer));
-      const answer = await peerConnection.createAnswer();
-      await peerConnection.setLocalDescription(answer);
-
-      callChannel.send({
-        type: 'broadcast',
-        event: 'call-answer',
-        payload: { answer, sender: me.id }
-      });
-
-      $('callModalStatus').textContent = "En communication";
+    const { data, error } = await db.from('calls').update({
+      status: 'accepted',
+      answered_at: new Date().toISOString()
+    }).eq('id', currentCall.id).eq('status', 'ringing').select();
+    if (error) throw error;
+    if (!data?.length) {
+      notify("Umuhamagaro warangiye.");
+      endCallUI();
+      return;
     }
+    currentCall.status = 'accepted';
+
+    wantAnswer = true;
+    if (pendingOffer) await answerOffer();
   } catch (error) {
+    errorMessage(error);
     endCall();
   }
 });
 
-function endCall() {
+/* ---------- 7. Terminer / refuser ---------- */
+async function endCall() {
+  if (callEnding) return;
+  callEnding = true;
+  try {
+    const call = currentCall;
+    const startedAt = callStartedAt;
+    clearRingingTimer();
+
+    if (callChannel) {
+      try { await sendBroadcast('end-call'); } catch (error) { console.warn(error); }
+    }
+    endCallUI();
+
+    if (call && me) {
+      const endStatus = (call.status === 'ringing' && call.caller_id !== me.id)
+        ? 'declined'
+        : 'ended';
+      const patch = { status: endStatus, ended_at: new Date().toISOString() };
+      if (startedAt && endStatus === 'ended') {
+        patch.duration_seconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+      }
+      const { error } = await db.from('calls').update(patch)
+        .eq('id', call.id)
+        .in('status', ['ringing', 'accepted']);
+      if (error) console.warn('End call update:', error);
+    }
+  } finally {
+    callEnding = false;
+  }
+}
+
+function endCallUI() {
+  clearRingingTimer();
+  currentCall = null;
+  pendingOffer = null;
+  pendingCandidates = [];
+  offerSent = false;
+  wantAnswer = false;
+  callStartedAt = null;
+  micMuted = false;
+  camDisabled = false;
+  $('toggleMicBtn')?.classList.remove('off');
+  $('toggleCamBtn')?.classList.remove('off');
+
   if (callChannel) {
-    callChannel.send({
-      type: 'broadcast',
-      event: 'end-call',
-      payload: { sender: me?.id }
-    });
     db.removeChannel(callChannel);
     callChannel = null;
   }
-
   if (peerConnection) {
     peerConnection.close();
     peerConnection = null;
   }
-
   if (localStream) {
     localStream.getTracks().forEach(track => track.stop());
     localStream = null;
@@ -1258,11 +1756,105 @@ function endCall() {
   if (remoteVideo) remoteVideo.srcObject = null;
 }
 
-$('endCallBtn')?.addEventListener('click', endCall);
+/* ---------- Boutons : micro, caméra, fin, démarrage ---------- */
+$('toggleMicBtn')?.addEventListener('click', () => {
+  const audioTrack = localStream?.getAudioTracks()[0];
+  if (!audioTrack) return;
+  micMuted = !micMuted;
+  audioTrack.enabled = !micMuted;
+  $('toggleMicBtn').classList.toggle('off', micMuted);
+  notify(micMuted ? "Microphone yazimijwe" : "Microphone yawejewe");
+});
 
+$('toggleCamBtn')?.addEventListener('click', () => {
+  const videoTrack = localStream?.getVideoTracks()[0];
+  if (!videoTrack) return;
+  camDisabled = !camDisabled;
+  videoTrack.enabled = !camDisabled;
+  $('toggleCamBtn').classList.toggle('off', camDisabled);
+  notify(camDisabled ? "Kamera yazimijwe" : "Kamera yawejewe");
+});
+
+$('endCallBtn')?.addEventListener('click', endCall);
 $('startAudioCall')?.addEventListener('click', () => initiateCall(false));
 $('startVideoCall')?.addEventListener('click', () => initiateCall(true));
 
+/* =====================================================
+   NOTIFICATIONS PUSH (appels et messages quand l'app est fermée)
+===================================================== */
+const pushSupported =
+  'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+
+async function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return null;
+  try {
+    return await navigator.serviceWorker.register('./sw.js');
+  } catch (error) {
+    console.warn('Service worker:', error);
+    return null;
+  }
+}
+registerServiceWorker();
+
+function urlBase64ToUint8Array(base64) {
+  const padding = '='.repeat((4 - (base64.length % 4)) % 4);
+  const raw = atob((base64 + padding).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(raw, char => char.charCodeAt(0));
+}
+
+async function savePushSubscription(subscription) {
+  const json = subscription.toJSON();
+  const { error } = await db.from('push_subscriptions').upsert(
+    {
+      user_id: me.id,
+      endpoint: json.endpoint,
+      p256dh: json.keys?.p256dh,
+      auth: json.keys?.auth
+    },
+    { onConflict: 'endpoint' }
+  );
+  if (error) throw error;
+}
+
+async function getPushSubscription() {
+  const registration = await navigator.serviceWorker.ready;
+  return (await registration.pushManager.getSubscription()) ||
+    registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(cfg.vapidPublicKey)
+    });
+}
+
+// À appeler depuis un geste de l'utilisateur (demande d'autorisation)
+async function enablePush() {
+  if (!me || !db) return;
+  if (!pushSupported) {
+    notify("Notifications ntizishoboka hano. Kuri iPhone, banza ushyire app kuri Home Screen.");
+    return;
+  }
+  if (!cfg?.vapidPublicKey) {
+    notify('Clé VAPID manquante dans la configuration (vapidPublicKey).');
+    return;
+  }
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') {
+      notify("Uruhusha rwa notifications ntirwatanzwe.");
+      return;
+    }
+    await savePushSubscription(await getPushSubscription());
+    notify("Notifications zifunguwe.");
+  } catch (error) {
+    errorMessage(error);
+  }
+}
+
+// Au démarrage : si l'autorisation existe déjà, on resynchronise sans rien demander
+async function syncPushSubscription() {
+  if (!pushSupported || !me || !cfg?.vapidPublicKey) return;
+  if (Notification.permission !== 'granted') return;
+  await savePushSubscription(await getPushSubscription());
+}
 /* =====================================================
    PARAMÈTRES
 ===================================================== */
@@ -1282,6 +1874,7 @@ $('settingsProfile')?.addEventListener('click', () => {
 });
 $('settingsNotifications')?.addEventListener('click', () => {
   showTab('notifications');
+  enablePush();
 });
 $('settingsPrivacy')?.addEventListener('click', () => {
   notify('La confidentialité dépend aussi des règles RLS configurées dans Supabase.');
