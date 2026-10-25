@@ -1732,7 +1732,7 @@ $('vDelete')?.addEventListener('click', async event => {
       .delete().eq('id', item.id).eq('user_id', me.id).select('id');
     if (error) throw error;
     if (!data?.length) {
-      throw new Error('Suppression refusée par la base (règle RLS). Exécutez la partie « suppression » de SETUP-fonctionnalites.sql.');
+      throw new Error('Suppression refusée par la base (règle RLS). Exécutez SUPPRESSION.sql dans Supabase (SQL Editor), puis réessayez.');
     }
     if (item.media_path) {
       const { error: fileError } = await db.storage.from('statuses').remove([item.media_path]);
@@ -2469,7 +2469,7 @@ async function deleteForEveryone(message, bubble) {
     }
     if (result.error) throw result.error;
     if (!result.data?.length) {
-      throw new Error('Suppression refusée par la base (règle RLS). Exécutez la partie « suppression » de SETUP-fonctionnalites.sql.');
+      throw new Error('Suppression refusée par la base (règle RLS). Exécutez SUPPRESSION.sql dans Supabase (SQL Editor), puis réessayez.');
     }
     if (message.media_path) {
       const { error: fileError } = await db.storage.from('media').remove([message.media_path]);
