@@ -64,6 +64,158 @@ function setBusy(button, busy, text) {
 function validUsername(value) {
   return /^[a-zA-Z0-9_]{3,30}$/.test(value);
 }
+/* ---------- numéro de téléphone ---------- */
+let HAS_PHONE = true; // passe à false si la colonne profiles.phone n'existe pas encore
+const PROFILE_BASE = 'id, username, full_name, avatar_url, bio, last_seen';
+const profileCols = () => PROFILE_BASE + (HAS_PHONE ? ', phone' : '');
+const MIN_PHONE_DIGITS = 9;
+
+// [code ISO, nom, indicatif] — les plus proches en premier, puis ordre alphabétique
+const COUNTRIES_TOP = [
+  ['BI', 'Burundi', '257'], ['CD', 'RD Congo', '243'], ['RW', 'Rwanda', '250'],
+  ['TZ', 'Tanzanie', '255'], ['UG', 'Ouganda', '256'], ['KE', 'Kenya', '254']
+];
+const COUNTRIES_MORE = [
+  ['ZA', 'Afrique du Sud', '27'], ['DZ', 'Algérie', '213'], ['DE', 'Allemagne', '49'], ['AO', 'Angola', '244'],
+  ['SA', 'Arabie saoudite', '966'], ['AR', 'Argentine', '54'], ['AU', 'Australie', '61'], ['AT', 'Autriche', '43'],
+  ['BE', 'Belgique', '32'], ['BJ', 'Bénin', '229'], ['BW', 'Botswana', '267'], ['BR', 'Brésil', '55'],
+  ['BF', 'Burkina Faso', '226'], ['CM', 'Cameroun', '237'], ['CA', 'Canada', '1'], ['CV', 'Cap-Vert', '238'],
+  ['CF', 'Centrafrique', '236'], ['CL', 'Chili', '56'], ['CN', 'Chine', '86'], ['CG', 'Congo-Brazzaville', '242'],
+  ['KR', 'Corée du Sud', '82'], ['CI', "Côte d'Ivoire", '225'], ['DK', 'Danemark', '45'], ['DJ', 'Djibouti', '253'],
+  ['EG', 'Égypte', '20'], ['AE', 'Émirats arabes unis', '971'], ['ER', 'Érythrée', '291'], ['ES', 'Espagne', '34'],
+  ['US', 'États-Unis', '1'], ['ET', 'Éthiopie', '251'], ['FI', 'Finlande', '358'], ['FR', 'France', '33'],
+  ['GA', 'Gabon', '241'], ['GM', 'Gambie', '220'], ['GH', 'Ghana', '233'], ['GN', 'Guinée', '224'],
+  ['GQ', 'Guinée équatoriale', '240'], ['HT', 'Haïti', '509'], ['IN', 'Inde', '91'], ['ID', 'Indonésie', '62'],
+  ['IE', 'Irlande', '353'], ['IL', 'Israël', '972'], ['IT', 'Italie', '39'], ['JP', 'Japon', '81'],
+  ['KM', 'Comores', '269'], ['LR', 'Liberia', '231'], ['LY', 'Libye', '218'], ['LU', 'Luxembourg', '352'],
+  ['MG', 'Madagascar', '261'], ['MW', 'Malawi', '265'], ['ML', 'Mali', '223'], ['MA', 'Maroc', '212'],
+  ['MU', 'Maurice', '230'], ['MR', 'Mauritanie', '222'], ['MX', 'Mexique', '52'], ['MZ', 'Mozambique', '258'],
+  ['NA', 'Namibie', '264'], ['NE', 'Niger', '227'], ['NG', 'Nigeria', '234'], ['NO', 'Norvège', '47'],
+  ['PK', 'Pakistan', '92'], ['NL', 'Pays-Bas', '31'], ['PL', 'Pologne', '48'], ['PT', 'Portugal', '351'],
+  ['QA', 'Qatar', '974'], ['GB', 'Royaume-Uni', '44'], ['RU', 'Russie', '7'], ['SN', 'Sénégal', '221'],
+  ['SC', 'Seychelles', '248'], ['SL', 'Sierra Leone', '232'], ['SO', 'Somalie', '252'], ['SD', 'Soudan', '249'],
+  ['SS', 'Soudan du Sud', '211'], ['SE', 'Suède', '46'], ['CH', 'Suisse', '41'], ['TD', 'Tchad', '235'],
+  ['TG', 'Togo', '228'], ['TN', 'Tunisie', '216'], ['TR', 'Turquie', '90'], ['ZM', 'Zambie', '260'],
+  ['ZW', 'Zimbabwe', '263']
+];
+const COUNTRIES = [...COUNTRIES_TOP, ...COUNTRIES_MORE];
+const DIALS_DESC = [...new Set(COUNTRIES.map(country => country[2]))]
+  .sort((a, b) => b.length - a.length);
+const TZ_COUNTRY = {
+  'Africa/Bujumbura': 'BI', 'Africa/Kinshasa': 'CD', 'Africa/Lubumbashi': 'CD', 'Africa/Kigali': 'RW',
+  'Africa/Dar_es_Salaam': 'TZ', 'Africa/Kampala': 'UG', 'Africa/Nairobi': 'KE', 'Africa/Lusaka': 'ZM',
+  'Africa/Brazzaville': 'CG', 'Africa/Luanda': 'AO', 'Africa/Johannesburg': 'ZA', 'Africa/Addis_Ababa': 'ET',
+  'Africa/Lagos': 'NG', 'Africa/Accra': 'GH', 'Africa/Abidjan': 'CI', 'Africa/Dakar': 'SN',
+  'Africa/Douala': 'CM', 'Africa/Libreville': 'GA', 'Africa/Cairo': 'EG', 'Africa/Casablanca': 'MA',
+  'Africa/Algiers': 'DZ', 'Africa/Tunis': 'TN', 'Africa/Maputo': 'MZ', 'Africa/Harare': 'ZW',
+  'Africa/Blantyre': 'MW', 'Indian/Antananarivo': 'MG', 'Europe/Paris': 'FR', 'Europe/Brussels': 'BE',
+  'Europe/Zurich': 'CH', 'Europe/Berlin': 'DE', 'Europe/London': 'GB', 'Europe/Rome': 'IT',
+  'Europe/Madrid': 'ES', 'America/Toronto': 'CA', 'America/Montreal': 'CA', 'America/New_York': 'US'
+};
+const countryByIso = iso => COUNTRIES.find(country => country[0] === iso);
+const flagOf = iso => String.fromCodePoint(...[...iso].map(ch => 127397 + ch.charCodeAt(0)));
+// Pays proposé automatiquement : dernier choix, pays du numéro du profil, fuseau horaire, langue, sinon Burundi
+function detectCountry() {
+  try {
+    const saved = localStorage.getItem('truechat.country');
+    if (saved && countryByIso(saved)) return saved;
+  } catch (error) { /* stockage indisponible */ }
+  const own = String(profile?.phone || '').replace(/\D/g, '');
+  if (own) {
+    const dial = DIALS_DESC.find(code => own.startsWith(code));
+    const match = dial && COUNTRIES.find(country => country[2] === dial);
+    if (match) return match[0];
+  }
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (TZ_COUNTRY[zone]) return TZ_COUNTRY[zone];
+  } catch (error) { /* ignoré */ }
+  const region = String(navigator.language || '').split('-')[1];
+  if (region && countryByIso(region.toUpperCase())) return region.toUpperCase();
+  return 'BI';
+}
+const countryPickers = [];
+function bindCountryPicker(selectId, labelId) {
+  const select = $(selectId);
+  const label = $(labelId);
+  if (!select) return;
+  COUNTRIES.forEach(([iso, name, dial]) => {
+    const option = document.createElement('option');
+    option.value = iso;
+    option.textContent = flagOf(iso) + '  ' + name + '  (+' + dial + ')';
+    select.append(option);
+  });
+  countryPickers.push({ select, label });
+  select.addEventListener('change', () => {
+    try { localStorage.setItem('truechat.country', select.value); } catch (error) { /* ignoré */ }
+    syncCountryPickers(select.value);
+    if ($('newChat') && !$('newChat').hidden) $('ncSearch')?.dispatchEvent(new Event('input'));
+  });
+}
+function syncCountryPickers(iso) {
+  const country = countryByIso(iso || detectCountry()) || COUNTRIES[0];
+  countryPickers.forEach(({ select, label }) => {
+    select.value = country[0];
+    if (label) label.textContent = flagOf(country[0]) + ' +' + country[2];
+  });
+}
+bindCountryPicker('phoneCountry', 'phoneCcLabel');
+bindCountryPicker('ncCountry', 'ncCcLabel');
+syncCountryPickers();
+const currentDial = () => (countryByIso($('phoneCountry')?.value || detectCountry()) || COUNTRIES[0])[2];
+
+// Chiffres seulement, avec l'indicatif. Sans « + », l'indicatif du pays choisi est ajouté tout seul.
+function normalizePhone(value, dial = currentDial()) {
+  const text = String(value || '').trim();
+  let digits = text.replace(/\D/g, '');
+  if (!digits) return '';
+  if (text.startsWith('+')) return digits;
+  if (digits.startsWith('00')) return digits.slice(2);
+  if (digits.startsWith(dial) && digits.length >= dial.length + 8) return digits;
+  digits = digits.replace(/^0+/, '');
+  return dial + digits;
+}
+function validPhone(digits) {
+  return /^[1-9]\d{8,14}$/.test(digits);
+}
+function groupRest(rest) {
+  if (rest.length === 9) return rest.replace(/(\d{3})(\d{3})(\d{3})/, '$1 $2 $3');
+  if (rest.length === 8) return rest.replace(/(\d{2})(\d{3})(\d{3})/, '$1 $2 $3');
+  return rest.replace(/(\d{3})(?=\d)/g, '$1 ');
+}
+function formatPhone(value) {
+  const d = String(value || '').replace(/\D/g, '');
+  if (!d) return '';
+  const dial = DIALS_DESC.find(code => d.startsWith(code));
+  if (!dial) return '+' + d;
+  return '+' + dial + ' ' + groupRest(d.slice(dial.length));
+}
+// Ce que la personne tape ressemble à un numéro (et non à un nom)
+function isPhoneQuery(raw) {
+  const text = String(raw || '').trim();
+  return /^[+\d\s().-]+$/.test(text) && text.replace(/\D/g, '').length >= 3;
+}
+const phoneDigits = raw => normalizePhone(raw);
+async function searchByPhone(raw) {
+  const digits = phoneDigits(raw);
+  if (!HAS_PHONE || digits.length < MIN_PHONE_DIGITS) return [];
+  const { data, error } = await db
+    .from('profiles')
+    .select('id, username, full_name, avatar_url, phone')
+    .eq('phone', digits)
+    .neq('id', me.id)
+    .limit(5);
+  if (error) throw error;
+  return data || [];
+}
+async function addContact(personId) {
+  if (!me || !personId) return;
+  try {
+    await db.from('contacts').insert({ owner_id: me.id, contact_id: personId });
+  } catch (error) {
+    /* déjà dans les contacts */
+  }
+}
 /* =====================================================
    AUTHENTIFICATION
 ===================================================== */
@@ -73,7 +225,7 @@ function setAuthMode(isSignup) {
   const toggle = $('toggleAuth');
   const password = $('password');
   const name = $('name');
-  const username = $('username');
+  const phone = $('phone');
   if (button) {
     button.textContent = signup
       ? 'Créer mon compte'
@@ -94,12 +246,11 @@ function setAuthMode(isSignup) {
       : 'Connectez-vous pour continuer.';
   }
   if ($('fieldName')) $('fieldName').hidden = !signup;
-  if ($('fieldUsername')) $('fieldUsername').hidden = !signup;
+  if ($('fieldPhone')) $('fieldPhone').hidden = !signup;
+  if ($('authHint')) $('authHint').hidden = !signup;
+  if ($('emailLabel')) $('emailLabel').textContent = signup ? 'Adresse Gmail' : 'Adresse e-mail';
   if (name) name.required = signup;
-  if (username) {
-    username.required = signup;
-    username.autocomplete = 'username';
-  }
+  if (phone) phone.required = signup;
   if (password) {
     password.autocomplete = signup
       ? 'new-password'
@@ -143,7 +294,7 @@ $('authForm')?.addEventListener('submit', async event => {
   const email = $('email').value.trim();
   const password = $('password').value;
   const fullName = $('name').value.trim();
-  const username = $('username').value.trim();
+  const phone = normalizePhone($('phone')?.value);
   const button = $('authSubmit');
   setBusy(button, true, 'Connexion...');
   $('auth')?.classList.remove('ok');
@@ -153,10 +304,15 @@ $('authForm')?.addEventListener('submit', async event => {
       if (!fullName) {
         throw new Error('Entrez votre nom complet.');
       }
-      if (!validUsername(username)) {
+      if (!validPhone(phone)) {
         throw new Error(
-          "Le nom d'utilisateur doit contenir 3 à 30 caractères : lettres, chiffres ou _."
+          'Entrez un numéro de téléphone valide (le pays choisi ajoute l’indicatif tout seul).'
         );
+      }
+      // Numéro déjà pris ? (si la fonction SQL phone_exists n'existe pas encore, on continue)
+      const { data: taken, error: phoneError } = await db.rpc('phone_exists', { p: phone });
+      if (!phoneError && taken === true) {
+        throw new Error('Ce numéro est déjà utilisé par un autre compte.');
       }
       const { data, error } = await db.auth.signUp({
         email,
@@ -164,7 +320,7 @@ $('authForm')?.addEventListener('submit', async event => {
         options: {
           data: {
             full_name: fullName,
-            username
+            phone
           }
         }
       });
@@ -242,11 +398,20 @@ $('logout')?.addEventListener('click', async () => {
 ===================================================== */
 async function loadProfile() {
   if (!me) return;
-  const { data, error } = await db
+  let { data, error } = await db
     .from('profiles')
-    .select('id, username, full_name, avatar_url, bio, last_seen')
+    .select(profileCols())
     .eq('id', me.id)
     .maybeSingle();
+  if (error && HAS_PHONE && /phone|42703/i.test((error.code || '') + ' ' + (error.message || ''))) {
+    // la colonne phone n'existe pas encore : exécuter SETUP-telephone.sql
+    HAS_PHONE = false;
+    ({ data, error } = await db
+      .from('profiles')
+      .select(profileCols())
+      .eq('id', me.id)
+      .maybeSingle());
+  }
   if (error) throw error;
   profile = data;
   /*
@@ -267,12 +432,31 @@ async function loadProfile() {
         full_name: me.user_metadata?.full_name || profile.full_name || ''
       })
       .eq('id', me.id)
-      .select('id, username, full_name, avatar_url, bio, last_seen')
+      .select(profileCols())
       .maybeSingle();
     if (!updateError && updated) {
       profile = updated;
     } else if (updateError) {
       console.warn('Profil non modifié:', updateError.message);
+    }
+  }
+  // Numéro choisi à l'inscription : on l'enregistre dans le profil à la première connexion
+  if (HAS_PHONE && profile && !profile.phone) {
+    const wantedPhone = normalizePhone(me.user_metadata?.phone);
+    if (validPhone(wantedPhone)) {
+      const { data: withPhone, error: phoneError } = await db
+        .from('profiles')
+        .update({ phone: wantedPhone })
+        .eq('id', me.id)
+        .select(profileCols())
+        .maybeSingle();
+      if (!phoneError && withPhone) {
+        profile = withPhone;
+      } else if (phoneError?.code === '23505') {
+        notify('Ce numéro est déjà utilisé par un autre compte.');
+      } else if (phoneError) {
+        console.warn('Numéro non enregistré:', phoneError.message);
+      }
     }
   }
   renderProfile();
@@ -292,7 +476,7 @@ function renderProfile() {
   if (!profile) return;
   const label = profile.full_name || profile.username || 'Utilisateur';
   if ($('profName')) $('profName').textContent = label + ' (vous)';
-  if ($('profUser')) $('profUser').textContent = '@' + (profile.username || '');
+  if ($('profUser')) $('profUser').textContent = formatPhone(profile.phone);
   setAvatar($('profAvatar'), profile.avatar_url, label);
   setAvatar($('navAvatar'), profile.avatar_url, label);
   positionNav(true);
@@ -309,16 +493,36 @@ $('editProfile')?.addEventListener('click', async () => {
   if (fullName === null) return;
   const bio = prompt('Votre biographie :', profile.bio || '');
   if (bio === null) return;
+  let phone = null;
+  if (HAS_PHONE) {
+    const typed = prompt(
+      'Votre numéro de téléphone (avec +indicatif, ex : +243 81 234 5678) :',
+      profile.phone ? formatPhone(profile.phone) : '+' + currentDial() + ' '
+    );
+    if (typed === null) return;
+    if (typed.replace(/\D/g, '').length > 3) {
+      phone = normalizePhone(typed);
+      if (!validPhone(phone)) {
+        notify('Numéro de téléphone invalide.');
+        return;
+      }
+    }
+  }
   try {
     const { data, error } = await db
       .from('profiles')
       .update({
         full_name: fullName.trim(),
-        bio: bio.trim()
+        bio: bio.trim(),
+        ...(phone ? { phone } : {})
       })
       .eq('id', me.id)
-      .select('id, username, full_name, avatar_url, bio, last_seen')
+      .select(profileCols())
       .single();
+    if (error?.code === '23505') {
+      notify('Ce numéro est déjà utilisé par un autre compte.');
+      return;
+    }
     if (error) throw error;
     profile = data;
     renderProfile();
@@ -335,6 +539,9 @@ async function initialize() {
   try {
     await loadProfile();
     renderAuth();
+    if (HAS_PHONE && profile && !profile.phone) {
+      notify('Ajoutez votre numéro : Vous → Modifier, pour que vos proches puissent vous trouver.');
+    }
     loadPrefs();
     await probeFeatures();
     renderSettingsRows();
@@ -378,28 +585,34 @@ $('searchForm')?.addEventListener('submit', async event => {
     notify('Entrez au moins 3 caractères.');
     return;
   }
+  const phoneMode = isPhoneQuery(term);
+  if (phoneMode && phoneDigits(term).length < MIN_PHONE_DIGITS) {
+    notify('Entrez le numéro complet, sans oublier le pays (ex : 79 123 456).');
+    return;
+  }
   const button = $('findUser');
   setBusy(button, true, 'Recherche...');
   try {
-    /*
-     * La table profiles ne contient pas nécessairement l'email.
-     * La recherche se fait donc sur username et full_name.
-     */
-    const safeTerm = term.replace(/[,%()]/g, '');
-    const { data, error } = await db
-      .from('profiles')
-      .select('id, username, full_name, avatar_url, bio')
-      .or(
-        `username.ilike.%${safeTerm}%,full_name.ilike.%${safeTerm}%`
-      )
-      .neq('id', me.id)
-      .limit(20);
-    if (error) throw error;
+    /* Un numéro se cherche par son numéro ; sinon on cherche dans les noms. */
+    let data;
+    if (phoneMode) {
+      data = await searchByPhone(term);
+    } else {
+      const safeTerm = term.replace(/[,%()_\\]/g, '');
+      const result = await db
+        .from('profiles')
+        .select('id, username, full_name, avatar_url, bio')
+        .ilike('full_name', `%${safeTerm}%`)
+        .neq('id', me.id)
+        .limit(20);
+      if (result.error) throw result.error;
+      data = result.data;
+    }
     const box = $('found');
     box.replaceChildren();
     if (!data?.length) {
       box.textContent =
-        'Aucun utilisateur trouvé. Essayez son nom d’utilisateur.';
+        'Aucun utilisateur trouvé. Essayez son numéro de téléphone complet.';
       return;
     }
     data.forEach(user => {
@@ -408,11 +621,14 @@ $('searchForm')?.addEventListener('submit', async event => {
       const title = document.createElement('p');
       title.textContent =
         (user.full_name || 'Utilisateur') +
-        ' — @' + user.username;
+        (user.phone ? ' — ' + formatPhone(user.phone) : '');
       const button = document.createElement('button');
       button.type = 'button';
       button.textContent = 'Envoyer un message';
-      button.onclick = () => startPrivateChat(user.id);
+      button.onclick = async () => {
+        if (phoneMode) await addContact(user.id);
+        startPrivateChat(user.id);
+      };
       card.append(title, button);
       box.append(card);
     });
@@ -551,6 +767,12 @@ function renderChatList() {
     text.textContent = advFor(row.id) ? 'Message masqué' : preview.text;
     msg.append(text);
     item.append(avatar, name, time, msg);
+    avatar.addEventListener('click', event => {
+      event.stopPropagation();
+      if (row.isGroup) openGroupInfo(row.id, row.name);
+      else if (row.otherId) openContactProfile(row.otherId);
+      else openRoom(row.id);
+    });
     item.onclick = () => openRoom(row.id);
     box.append(item);
   });
@@ -646,6 +868,8 @@ $('refresh')?.addEventListener('click', async () => {
 /* ---------- Nouvelle discussion (feuille du bouton +) ---------- */
 let ncPeople = [];
 let ncMode = 'chat';
+let ncPhoneResults = [];
+let ncPhoneTimer = null;
 const ncSelected = new Set();
 function ncLetter(name) {
   const first = String(name || '').trim().normalize('NFD')
@@ -665,7 +889,7 @@ function ncItem(person, opts = {}) {
   const title = document.createElement('b');
   title.textContent = label;
   text.append(title);
-  const sub = opts.sub || (opts.showUser && person.username ? '@' + person.username : '');
+  const sub = opts.sub || '';
   if (sub) {
     const small = document.createElement('small');
     small.textContent = sub;
@@ -686,6 +910,7 @@ function ncItem(person, opts = {}) {
       return;
     }
     closeNewChat();
+    if (opts.addContact) addContact(person.id);
     startPrivateChat(person.id);
   });
   return row;
@@ -700,12 +925,13 @@ function ncRender() {
   const body = $('ncBody');
   if (!body) return;
   body.replaceChildren();
-  const query = $('ncSearch').value.trim().toLowerCase().replace(/^@/, '');
+  const rawQuery = $('ncSearch').value.trim();
+  const phoneMode = isPhoneQuery(rawQuery);
+  const query = rawQuery.toLowerCase();
   const matches = person => !query ||
-    (person.full_name || '').toLowerCase().includes(query) ||
-    (person.username || '').toLowerCase().includes(query);
+    (person.full_name || '').toLowerCase().includes(query);
   $('ncActions').hidden = ncMode === 'group' || Boolean(query);
-  const people = ncPeople.filter(matches);
+  const people = phoneMode ? ncPhoneResults : ncPeople.filter(matches);
   const addTitle = text => {
     const title = document.createElement('h4');
     title.className = 'nc-title';
@@ -731,7 +957,11 @@ function ncRender() {
       )]));
     }
   } else {
-    addTitle(people.length ? 'Résultats' : 'Aucun résultat');
+    addTitle(
+      phoneMode && phoneDigits(rawQuery).length < MIN_PHONE_DIGITS
+        ? 'Entrez le numéro complet'
+        : people.length ? 'Résultats' : 'Aucun résultat'
+    );
   }
   const sections = new Map();
   people.forEach(person => {
@@ -750,7 +980,9 @@ function ncRender() {
       body.append(title);
     }
     body.append(ncGroupCard(
-      sections.get(letter).map(person => ncItem(person, { showUser: true }))
+      sections.get(letter).map(person => ncItem(person, phoneMode
+        ? { sub: formatPhone(person.phone), addContact: true }
+        : {}))
     ));
   });
   if (ncMode === 'group') {
@@ -777,6 +1009,7 @@ async function openNewChat(mode = 'chat') {
   if (!me || !db) return;
   ncMode = mode;
   ncSelected.clear();
+  ncPhoneResults = [];
   $('ncTitle').textContent = mode === 'group' ? 'Nouveau groupe' : 'Nouvelle discussion';
   $('ncGroupBar').hidden = mode !== 'group';
   $('ncGroupName').value = '';
@@ -811,11 +1044,35 @@ $('ncClose')?.addEventListener('click', closeNewChat);
 $('newChat')?.addEventListener('click', event => {
   if (event.target === $('newChat')) closeNewChat();
 });
-$('ncSearch')?.addEventListener('input', ncRender);
+$('ncSearch')?.addEventListener('input', () => {
+  clearTimeout(ncPhoneTimer);
+  const raw = $('ncSearch').value;
+  if (!isPhoneQuery(raw) || phoneDigits(raw).length < MIN_PHONE_DIGITS) {
+    ncPhoneResults = [];
+    ncRender();
+    return;
+  }
+  ncPhoneResults = [];
+  ncRender();
+  ncPhoneTimer = setTimeout(async () => {
+    try {
+      ncPhoneResults = await searchByPhone(raw);
+    } catch (error) {
+      ncPhoneResults = [];
+      console.warn('Recherche par numéro:', error.message || error);
+    }
+    if ($('ncSearch').value === raw) ncRender();
+  }, 350);
+});
 $('ncGroup')?.addEventListener('click', () => openNewChat('group'));
 $('ncContact')?.addEventListener('click', () => {
-  notify('Recherchez le nom ou @nomdeprofil, puis touchez la personne.');
-  $('ncSearch')?.focus();
+  const input = $('ncSearch');
+  if (!input) return;
+  input.value = '';
+  input.inputMode = 'tel';
+  ncRender();
+  notify('Choisissez le pays à droite, puis entrez le numéro : l’indicatif s’ajoute tout seul.');
+  input.focus();
 });
 $('ncCommunity')?.addEventListener('click', () => notify('Bientôt disponible.'));
 $('ncBroadcast')?.addEventListener('click', () => notify('Bientôt disponible.'));
@@ -870,6 +1127,20 @@ async function openRoom(id) {
   if (data && FEATURE.convExpiry) roomMeta[id] = { ephemeral_seconds: data.ephemeral_seconds };
   applyRoomLook();
   const cached = chatRows.find(row => row.id === id);
+  roomOtherId = cached?.isGroup ? null : (cached?.otherId || null);
+  if (!cached && data && !data.is_group) {
+    try {
+      const { data: others } = await db
+        .from('conversation_members')
+        .select('user_id')
+        .eq('conversation_id', id)
+        .neq('user_id', me.id)
+        .limit(1);
+      roomOtherId = others?.[0]?.user_id || null;
+    } catch (error) {
+      roomOtherId = null;
+    }
+  }
   const roomName = cached?.name ||
     data?.title || (data?.is_group ? 'Groupe' : 'Conversation privée');
   $('roomTitle').textContent = roomName;
@@ -1259,6 +1530,127 @@ function buildVoicePlayer(message, url) {
   }
   return wrap;
 }
+
+/* =====================================================
+   PROFIL D'UN CONTACT / INFOS DU GROUPE (touchez la photo ou le nom)
+===================================================== */
+let roomOtherId = null;
+function showPhoto(url, label) {
+  const old = $('photoView');
+  if (old) old.remove();
+  const view = document.createElement('div');
+  view.id = 'photoView';
+  const img = document.createElement('img');
+  img.src = url;
+  img.alt = label || 'Photo de profil';
+  const caption = document.createElement('p');
+  caption.textContent = label || '';
+  view.append(img, caption);
+  view.addEventListener('click', () => view.remove());
+  document.body.append(view);
+}
+async function openContactProfile(userId) {
+  if (!userId || !db) return;
+  let person = null;
+  try {
+    const { data, error } = await db
+      .from('profiles')
+      .select(profileCols())
+      .eq('id', userId)
+      .maybeSingle();
+    if (error) throw error;
+    person = data;
+  } catch (error) {
+    errorMessage(error);
+    return;
+  }
+  if (!person) {
+    notify('Profil introuvable.');
+    return;
+  }
+  const label = person.full_name || person.username || 'Utilisateur';
+  const isMe = person.id === me?.id;
+  sheetOpen(isMe ? 'Mon profil' : 'Infos du contact', body => {
+    const card = document.createElement('div');
+    card.className = 'pf-card';
+    const avatar = document.createElement('span');
+    avatar.className = 'avatar pf-av';
+    setAvatar(avatar, person.avatar_url, label);
+    if (person.avatar_url) {
+      avatar.classList.add('zoomable');
+      avatar.addEventListener('click', () => showPhoto(person.avatar_url, label));
+    }
+    const name = document.createElement('h3');
+    name.textContent = label + (isMe ? ' (vous)' : '');
+    card.append(avatar, name);
+    if (person.phone) {
+      const phone = document.createElement('p');
+      phone.className = 'pf-phone';
+      phone.textContent = formatPhone(person.phone);
+      card.append(phone);
+    }
+    if (person.bio) {
+      const bio = document.createElement('p');
+      bio.className = 'pf-bio';
+      bio.textContent = person.bio;
+      card.append(bio);
+    }
+    body.append(card);
+    if (!isMe) {
+      const go = document.createElement('button');
+      go.type = 'button';
+      go.className = 'pf-go';
+      go.textContent = room && roomOtherId === person.id ? 'Retour à la discussion' : 'Envoyer un message';
+      go.addEventListener('click', () => {
+        closeSheet();
+        if (!(room && roomOtherId === person.id)) startPrivateChat(person.id);
+      });
+      body.append(go);
+    }
+  });
+}
+async function openGroupInfo(conversationId, title) {
+  if (!conversationId || !db) return;
+  try {
+    const { data: members, error } = await db
+      .from('conversation_members')
+      .select('user_id')
+      .eq('conversation_id', conversationId);
+    if (error) throw error;
+    const ids = (members || []).map(item => item.user_id);
+    let people = [];
+    if (ids.length) {
+      const result = await db.from('profiles').select(profileCols()).in('id', ids);
+      if (result.error) throw result.error;
+      people = result.data || [];
+    }
+    sheetOpen(title || 'Groupe', body => {
+      body.append(scopeNote(people.length + ' participant' + (people.length > 1 ? 's' : '')));
+      const list = document.createElement('div');
+      list.className = 'pf-members';
+      people.forEach(person => {
+        const label = person.full_name || person.username || 'Utilisateur';
+        const row = optRow(label + (person.id === me?.id ? ' (vous)' : ''),
+          person.phone ? formatPhone(person.phone) : '', () => openContactProfile(person.id));
+        const avatar = document.createElement('span');
+        avatar.className = 'avatar';
+        setAvatar(avatar, person.avatar_url, label);
+        row.prepend(avatar);
+        list.append(row);
+      });
+      body.append(list);
+    });
+  } catch (error) {
+    errorMessage(error);
+  }
+}
+async function openRoomProfile() {
+  if (!room) return;
+  if (roomOtherId) openContactProfile(roomOtherId);
+  else openGroupInfo(room, $('roomTitle')?.textContent);
+}
+$('roomAvatar')?.addEventListener('click', openRoomProfile);
+document.querySelector('.room-bar .room-title')?.addEventListener('click', openRoomProfile);
 /* =====================================================
    ENVOI DE MESSAGES ET DE MÉDIAS
 ===================================================== */
@@ -2437,6 +2829,155 @@ function optRow(label, value, onClick, opts = {}) {
   return row;
 }
 
+
+/* =====================================================
+   FOND ANIMÉ : BOULES PERSONNALISABLES (couleurs, taille, vitesse)
+===================================================== */
+const BG_PRESETS = [
+  { id: 'aurore', name: 'Aurore', colors: ['#1a6bff', '#2fe0a0', '#d63fe6', '#5b3df0'] },
+  { id: 'ocean', name: 'Océan', colors: ['#06b6d4', '#38bdf8', '#2563eb', '#0ea5a4'] },
+  { id: 'sunset', name: 'Coucher de soleil', colors: ['#f97316', '#fbbf24', '#e11d48', '#c026d3'] },
+  { id: 'foret', name: 'Forêt', colors: ['#16a34a', '#84cc16', '#0d9488', '#15803d'] },
+  { id: 'rose', name: 'Rose', colors: ['#ec4899', '#f9a8d4', '#a21caf', '#fb7185'] },
+  { id: 'neon', name: 'Néon', colors: ['#22d3ee', '#a3e635', '#f0abfc', '#facc15'] },
+  { id: 'or', name: 'Or', colors: ['#d4a017', '#fde68a', '#b45309', '#f59e0b'] },
+  { id: 'nuit', name: 'Nuit', colors: ['#334155', '#1e3a8a', '#4c1d95', '#0f766e'] }
+];
+const BG_KEY = 'truechat.bg';
+const BG_SPEEDS = [
+  { value: 0, label: 'Arrêtées' }, { value: 0.6, label: 'Lentes' },
+  { value: 1, label: 'Normales' }, { value: 1.8, label: 'Rapides' }
+];
+const bgDefault = () => ({ preset: 'aurore', colors: [...BG_PRESETS[0].colors], size: 1, speed: 1 });
+let bgPrefs = bgDefault();
+try {
+  const saved = JSON.parse(localStorage.getItem(BG_KEY) || 'null');
+  if (saved && Array.isArray(saved.colors) && saved.colors.length === 4) bgPrefs = { ...bgDefault(), ...saved };
+} catch (error) { /* ignoré */ }
+function hexToRgb(hex) {
+  const h = String(hex).replace('#', '');
+  return [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16) || 0);
+}
+function mixHex(a, b, t) {
+  const x = hexToRgb(a);
+  const y = hexToRgb(b);
+  return '#' + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, '0')).join('');
+}
+const orbGradient = color =>
+  'linear-gradient(145deg, ' + mixHex(color, '#ffffff', .42) + ' 0%, ' + color + ' 55%, ' + mixHex(color, '#000000', .38) + ' 100%)';
+function applyBg() {
+  const el = $('bg');
+  if (!el) return;
+  const isDefault = bgPrefs.preset === 'aurore' &&
+    bgPrefs.colors.every((c, i) => c === BG_PRESETS[0].colors[i]);
+  bgPrefs.colors.forEach((color, i) => {
+    if (isDefault) el.style.removeProperty('--o' + (i + 1));
+    else el.style.setProperty('--o' + (i + 1), orbGradient(color));
+  });
+  el.style.setProperty('--bgsize', String(bgPrefs.size));
+  el.style.setProperty('--bgslow', String(bgPrefs.speed ? 1 / bgPrefs.speed : 1));
+  el.classList.toggle('still', !bgPrefs.speed);
+}
+function saveBg() {
+  try { localStorage.setItem(BG_KEY, JSON.stringify(bgPrefs)); } catch (error) { /* ignoré */ }
+}
+applyBg();
+function renderBgSection(box) {
+  box.replaceChildren();
+  const title = document.createElement('h4');
+  title.className = 'sec-title';
+  title.textContent = 'Fond animé : les boules';
+  box.append(title, scopeNote('Le fond change dans toute l’application. Choisissez un style ou composez le vôtre.'));
+  const grid = document.createElement('div');
+  grid.className = 'theme-grid';
+  BG_PRESETS.forEach(preset => {
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = 'theme-tile bg-tile' + (bgPrefs.preset === preset.id ? ' sel' : '');
+    preset.colors.forEach(color => {
+      const orb = document.createElement('b');
+      orb.style.background = orbGradient(color);
+      tile.append(orb);
+    });
+    const name = document.createElement('span');
+    name.textContent = preset.name;
+    tile.append(name);
+    tile.addEventListener('click', () => {
+      bgPrefs.preset = preset.id;
+      bgPrefs.colors = [...preset.colors];
+      applyBg();
+      saveBg();
+      renderBgSection(box);
+    });
+    grid.append(tile);
+  });
+  box.append(grid);
+
+  const pickers = document.createElement('div');
+  pickers.className = 'bg-colors';
+  bgPrefs.colors.forEach((color, i) => {
+    const wrap = document.createElement('label');
+    const input = document.createElement('input');
+    input.type = 'color';
+    input.value = color;
+    input.addEventListener('input', () => {
+      bgPrefs.colors[i] = input.value;
+      bgPrefs.preset = 'custom';
+      applyBg();
+    });
+    input.addEventListener('change', () => {
+      saveBg();
+      grid.querySelectorAll('.bg-tile.sel').forEach(tile => tile.classList.remove('sel'));
+    });
+    const text = document.createElement('span');
+    text.textContent = 'Boule ' + (i + 1);
+    wrap.append(input, text);
+    pickers.append(wrap);
+  });
+  box.append(scopeNote('Vos couleurs : touchez une boule pour changer sa couleur.'), pickers);
+
+  const size = document.createElement('div');
+  size.className = 'bg-range';
+  const sizeLabel = document.createElement('span');
+  sizeLabel.textContent = 'Taille';
+  const range = document.createElement('input');
+  range.type = 'range';
+  range.min = '0.6';
+  range.max = '1.5';
+  range.step = '0.05';
+  range.value = String(bgPrefs.size);
+  range.addEventListener('input', () => {
+    bgPrefs.size = Number(range.value);
+    applyBg();
+  });
+  range.addEventListener('change', saveBg);
+  size.append(sizeLabel, range);
+  box.append(size);
+
+  const speeds = document.createElement('div');
+  speeds.className = 'opt-tabs';
+  BG_SPEEDS.forEach(option => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = option.label;
+    button.className = bgPrefs.speed === option.value ? 'on' : '';
+    button.addEventListener('click', () => {
+      bgPrefs.speed = option.value;
+      applyBg();
+      saveBg();
+      renderBgSection(box);
+    });
+    speeds.append(button);
+  });
+  box.append(speeds);
+  box.append(optRow('Remettre le fond d’origine', '', () => {
+    bgPrefs = bgDefault();
+    applyBg();
+    saveBg();
+    renderBgSection(box);
+  }));
+}
+
 /* ---------- Thème de la discussion ---------- */
 function openThemeSheet() {
   sheetOpen('Thème de la discussion', body => {
@@ -2472,6 +3013,9 @@ function openThemeSheet() {
         openThemeSheet();
       }));
     }
+    const bgBox = document.createElement('div');
+    renderBgSection(bgBox);
+    body.append(bgBox);
   });
 }
 
@@ -3333,7 +3877,7 @@ $('avatarFile')?.addEventListener('change', async () => {
       .from('profiles')
       .update({ avatar_url: pub.publicUrl })
       .eq('id', me.id)
-      .select('id, username, full_name, avatar_url, bio, last_seen')
+      .select(profileCols())
       .single();
     if (error) throw error;
     profile = data;
