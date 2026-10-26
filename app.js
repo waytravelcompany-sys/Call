@@ -552,10 +552,22 @@ async function initialize() {
     await loadChats();
     await loadNotifications();
     syncPushSubscription().catch(error => console.warn('Push:', error));
+    handlePendingRoom();
   } catch (error) {
     errorMessage(error);
   }
 }
+function handlePendingRoom() {
+  const match = /room=([0-9a-f-]{36})/i.exec(location.hash);
+  if (!match) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  openRoom(match[1]).catch(errorMessage);
+}
+navigator.serviceWorker?.addEventListener('message', event => {
+  if (event.data?.type === 'open-room' && me && event.data.id) {
+    openRoom(event.data.id).catch(errorMessage);
+  }
+});
 function renderAuth() {
   $show('auth', !me);
   $show('home', Boolean(me));
@@ -868,6 +880,7 @@ $('refresh')?.addEventListener('click', async () => {
 /* ---------- Nouvelle discussion (feuille du bouton +) ---------- */
 let ncPeople = [];
 let ncMode = 'chat';
+let ncAddTo = null;   // identifiant du groupe quand on ajoute des participants
 let ncPhoneResults = [];
 let ncPhoneTimer = null;
 const ncSelected = new Set();
@@ -986,9 +999,8 @@ function ncRender() {
     ));
   });
   if (ncMode === 'group') {
-    $('ncGroupGo').textContent = ncSelected.size
-      ? 'Créer le groupe (' + ncSelected.size + ')'
-      : 'Créer le groupe';
+    const label = ncAddTo ? 'Ajouter' : 'Créer le groupe';
+    $('ncGroupGo').textContent = ncSelected.size ? label + ' (' + ncSelected.size + ')' : label;
   }
 }
 function ncBuildAlpha() {
@@ -1005,12 +1017,15 @@ function ncBuildAlpha() {
     alpha.append(key);
   });
 }
-async function openNewChat(mode = 'chat') {
+async function openNewChat(mode = 'chat', addTo = null) {
   if (!me || !db) return;
   ncMode = mode;
+  ncAddTo = addTo;
   ncSelected.clear();
   ncPhoneResults = [];
-  $('ncTitle').textContent = mode === 'group' ? 'Nouveau groupe' : 'Nouvelle discussion';
+  $('ncTitle').textContent = addTo ? 'Ajouter des participants'
+    : mode === 'group' ? 'Nouveau groupe' : 'Nouvelle discussion';
+  $('ncGroupName').hidden = Boolean(addTo);
   $('ncGroupBar').hidden = mode !== 'group';
   $('ncGroupName').value = '';
   $('ncSearch').value = '';
@@ -1028,6 +1043,13 @@ async function openNewChat(mode = 'chat') {
       .limit(1000);
     if (error) throw error;
     ncPeople = data || [];
+    if (addTo) {
+      const { data: current, error: currentError } = await db
+        .from('conversation_members').select('user_id').eq('conversation_id', addTo);
+      if (currentError) throw currentError;
+      const already = new Set((current || []).map(item => item.user_id));
+      ncPeople = ncPeople.filter(person => !already.has(person.id));
+    }
     ncRender();
   } catch (error) {
     $('ncBody').textContent = '';
@@ -1078,6 +1100,30 @@ $('ncCommunity')?.addEventListener('click', () => notify('Bientôt disponible.')
 $('ncBroadcast')?.addEventListener('click', () => notify('Bientôt disponible.'));
 $('ncGroupBar')?.addEventListener('submit', async event => {
   event.preventDefault();
+  if (ncAddTo) {
+    if (!ncSelected.size) {
+      notify('Choisissez au moins une personne.');
+      return;
+    }
+    const target = ncAddTo;
+    const addButton = $('ncGroupGo');
+    setBusy(addButton, true, 'Ajout...');
+    try {
+      const { error } = await db.rpc('add_group_members', {
+        group_id: target,
+        member_ids: [...ncSelected]
+      });
+      if (error) throw error;
+      closeNewChat();
+      notify('Participants ajoutés.');
+      openGroupInfo(target, $('roomTitle')?.textContent);
+    } catch (error) {
+      groupRpcError(error);
+    } finally {
+      setBusy(addButton, false);
+    }
+    return;
+  }
   const title = $('ncGroupName').value.trim();
   if (!title) {
     notify('Entrez le nom du groupe.');
@@ -1639,9 +1685,50 @@ async function openGroupInfo(conversationId, title) {
         list.append(row);
       });
       body.append(list);
+      body.append(optRow('➕ Ajouter des participants', '›', () => {
+        closeSheet();
+        openNewChat('group', conversationId);
+      }));
+      body.append(optRow('✏️ Renommer le groupe', '›', () => renameGroup(conversationId, title)));
+      body.append(optRow('🚪 Quitter le groupe', '', () => leaveGroup(conversationId)));
     });
   } catch (error) {
     errorMessage(error);
+  }
+}
+function groupRpcError(error) {
+  const text = String(error?.message || error);
+  if (/could not find the function|schema cache/i.test(text)) {
+    notify('Fonction manquante : exécutez SETUP-push-groupes.sql dans Supabase (SQL Editor).');
+  } else {
+    errorMessage(error);
+  }
+}
+async function renameGroup(conversationId, current) {
+  const name = (prompt('Nouveau nom du groupe', current || '') || '').trim();
+  if (!name || name === current) return;
+  try {
+    const { error } = await db.rpc('rename_group', { group_id: conversationId, new_title: name });
+    if (error) throw error;
+    if (room === conversationId && $('roomTitle')) $('roomTitle').textContent = name;
+    closeSheet();
+    notify('Groupe renommé.');
+    await loadChats();
+  } catch (error) {
+    groupRpcError(error);
+  }
+}
+async function leaveGroup(conversationId) {
+  if (!confirm('Quitter ce groupe ? Vous ne recevrez plus ses messages.')) return;
+  try {
+    const { error } = await db.rpc('leave_group', { group_id: conversationId });
+    if (error) throw error;
+    closeSheet();
+    if (room === conversationId) $('back')?.click();
+    await loadChats();
+    notify('Vous avez quitté le groupe.');
+  } catch (error) {
+    groupRpcError(error);
   }
 }
 async function openRoomProfile() {
