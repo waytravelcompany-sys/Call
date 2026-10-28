@@ -1,5 +1,6 @@
-/* TRUE CHAT — service worker : installation PWA, mode hors-ligne (coquille) et notifications push */
-const CACHE = 'truechat-shell-v1';
+/* TRUE CHAT — service worker : installation PWA, mode hors-ligne et notifications push */
+const CACHE = 'truechat-shell-v3';
+const CDN_CACHE = 'truechat-cdn-v1';
 const SHELL = [
   './',
   './index.html',
@@ -9,20 +10,48 @@ const SHELL = [
   './icon-512.png',
   './apple-touch-icon.png'
 ];
+// Bibliothèque Supabase (chargée depuis esm.sh) : nécessaire pour ouvrir l'app sans réseau
+const SUPABASE_ENTRY = 'https://esm.sh/@supabase/supabase-js@2';
+
+/* Télécharge un module esm.sh et les modules qu'il importe (profondeur limitée) */
+async function cacheModule(cache, url, depth = 0) {
+  if (depth > 5) return;
+  if (await cache.match(url)) return;
+  const response = await fetch(url, { mode: 'cors' });
+  if (!response.ok) return;
+  await cache.put(url, response.clone());
+  const text = await response.text();
+  const found = new Set();
+  const pattern = /(?:from|import)\s*["'](\/[^"']+|https:\/\/esm\.sh\/[^"']+)["']/g;
+  let match;
+  while ((match = pattern.exec(text))) {
+    found.add(new URL(match[1], url).href);
+  }
+  for (const next of found) {
+    await cacheModule(cache, next, depth + 1).catch(() => {});
+  }
+}
 
 self.addEventListener('install', event => {
-  event.waitUntil(
-    caches.open(CACHE)
-      // addAll échoue en bloc si un fichier manque : on les ajoute un par un
-      .then(cache => Promise.all(SHELL.map(url => cache.add(url).catch(() => null))))
-      .then(() => self.skipWaiting())
-  );
+  event.waitUntil((async () => {
+    const shell = await caches.open(CACHE);
+    await Promise.all(SHELL.map(url => shell.add(url).catch(() => null)));
+    try {
+      const cdn = await caches.open(CDN_CACHE);
+      await cacheModule(cdn, SUPABASE_ENTRY);
+    } catch (error) {
+      /* hors-ligne ou bloqué : le cache se remplira à la prochaine visite */
+    }
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key))))
+      .then(keys => Promise.all(
+        keys.filter(key => key !== CACHE && key !== CDN_CACHE).map(key => caches.delete(key))
+      ))
       .then(() => self.clients.claim())
   );
 });
@@ -31,7 +60,21 @@ self.addEventListener('fetch', event => {
   const request = event.request;
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
-  // Supabase, CDN, etc. : jamais en cache (données privées, temps réel)
+
+  // Modules esm.sh : cache d'abord (version figée), sinon réseau puis mise en cache
+  if (url.hostname === 'esm.sh') {
+    event.respondWith(
+      caches.open(CDN_CACHE).then(async cache => {
+        const hit = await cache.match(request);
+        if (hit) return hit;
+        const response = await fetch(request);
+        if (response.ok) cache.put(request, response.clone());
+        return response;
+      })
+    );
+    return;
+  }
+  // Supabase (données privées), autres sites : jamais en cache
   if (url.origin !== self.location.origin) return;
 
   if (request.mode === 'navigate') {
