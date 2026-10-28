@@ -197,16 +197,7 @@ function isPhoneQuery(raw) {
 }
 const phoneDigits = raw => normalizePhone(raw);
 async function searchByPhone(raw) {
-  const digits = phoneDigits(raw);
-  if (!HAS_PHONE || digits.length < MIN_PHONE_DIGITS) return [];
-  const { data, error } = await db
-    .from('profiles')
-    .select('id, username, full_name, avatar_url, phone')
-    .eq('phone', digits)
-    .neq('id', me.id)
-    .limit(5);
-  if (error) throw error;
-  return data || [];
+  return findProfiles(raw);
 }
 async function addContact(personId) {
   if (!me || !personId) return;
@@ -483,61 +474,24 @@ function renderProfile() {
   if ($('welcomeUser')) {
     $('welcomeUser').textContent = 'Bienvenue, ' + label;
   }
+  if ($('profilePage') && !$('profilePage').hidden) renderProfilePage();
 }
-$('editProfile')?.addEventListener('click', async () => {
-  if (!profile) return;
-  const fullName = prompt(
-    'Votre nom complet :',
-    profile.full_name || ''
-  );
-  if (fullName === null) return;
-  const bio = prompt('Votre biographie :', profile.bio || '');
-  if (bio === null) return;
-  let phone = null;
-  if (HAS_PHONE) {
-    const typed = prompt(
-      'Votre numéro de téléphone (avec +indicatif, ex : +243 81 234 5678) :',
-      profile.phone ? formatPhone(profile.phone) : '+' + currentDial() + ' '
-    );
-    if (typed === null) return;
-    if (typed.replace(/\D/g, '').length > 3) {
-      phone = normalizePhone(typed);
-      if (!validPhone(phone)) {
-        notify('Numéro de téléphone invalide.');
-        return;
-      }
-    }
-  }
-  try {
-    const { data, error } = await db
-      .from('profiles')
-      .update({
-        full_name: fullName.trim(),
-        bio: bio.trim(),
-        ...(phone ? { phone } : {})
-      })
-      .eq('id', me.id)
-      .select(profileCols())
-      .single();
-    if (error?.code === '23505') {
-      notify('Ce numéro est déjà utilisé par un autre compte.');
-      return;
-    }
-    if (error) throw error;
-    profile = data;
-    renderProfile();
-    notify('Profil mis à jour.');
-  } catch (error) {
-    errorMessage(error);
-  }
-});
+$('editProfile')?.addEventListener('click', openProfilePage);
+$('profName')?.addEventListener('click', openProfilePage);
 /* =====================================================
    INITIALISATION
 ===================================================== */
 async function initialize() {
   if (!db || !me) return;
   try {
-    await loadProfile();
+    try {
+      await loadProfile();
+      cacheSet('profile', profile);
+    } catch (profileError) {
+      if (!isNetworkError(profileError)) throw profileError;
+      profile = cacheGet('profile');
+      if (profile) renderProfile();
+    }
     renderAuth();
     if (HAS_PHONE && profile && !profile.phone) {
       notify('Ajoutez votre numéro : Vous → Modifier, pour que vos proches puissent vous trouver.');
@@ -550,9 +504,13 @@ async function initialize() {
       showLockScreen();
     }
     await loadChats();
-    await loadNotifications();
+    await loadNotifications().catch(error => {
+      if (!isNetworkError(error)) throw error;
+    });
     syncPushSubscription().catch(error => console.warn('Push:', error));
     handlePendingRoom();
+    startInbox();
+    flushOutbox();
   } catch (error) {
     errorMessage(error);
   }
@@ -575,6 +533,7 @@ function renderAuth() {
   $show('logout', Boolean(me));
   if (me) requestAnimationFrame(() => positionNav(true));
   if (!me) {
+    stopInbox();
     closeSheet();
     $show('lockScreen', false);
     cancelVoiceRecording();
@@ -709,86 +668,6 @@ function previewOf(last) {
   if (last.type === 'file') return { text: 'Fichier', voice: false };
   return { text: last.content || '', voice: false };
 }
-function renderChatList() {
-  const box = $('chats');
-  if (!box) return;
-  box.replaceChildren();
-  const groupCount = chatRows.filter(row => row.isGroup).length;
-  if ($('groupsCount')) {
-    $('groupsCount').textContent = groupCount ? String(groupCount) : '';
-  }
-  const rows = chatRows.filter(row => {
-    if (chatFilter === 'groups' && !row.isGroup) return false;
-    if (chatQuery && !row.name.toLowerCase().includes(chatQuery)) return false;
-    if (showLockedList ? !isRoomLocked(row.id) : isRoomLocked(row.id)) return false;
-    return true;
-  });
-  const lockedCount = chatRows.filter(row => isRoomLocked(row.id)).length;
-  if (lockedCount && !chatQuery) {
-    const lockRow = document.createElement('button');
-    lockRow.type = 'button';
-    lockRow.className = 'chat-row';
-    lockRow.style.cssText = 'grid-template-columns:1fr;padding:14px 16px;font-weight:700;text-align:left;';
-    lockRow.textContent = showLockedList
-      ? '← Retour aux discussions'
-      : '🔒 Discussions verrouillées (' + lockedCount + ')';
-    lockRow.onclick = async () => {
-      if (showLockedList) {
-        showLockedList = false;
-      } else {
-        if (!(await verifyPin('Discussions verrouillées'))) return;
-        showLockedList = true;
-      }
-      renderChatList();
-    };
-    box.append(lockRow);
-  }
-  if (!rows.length) {
-    const empty = document.createElement('p');
-    empty.className = 'empty';
-    empty.textContent = chatRows.length
-      ? 'Aucune discussion ne correspond.'
-      : 'Aucune conversation. Recherchez une personne pour commencer.';
-    box.append(empty);
-    return;
-  }
-  rows.forEach(row => {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'chat-row';
-    const avatar = document.createElement('span');
-    avatar.className = 'avatar';
-    setAvatar(avatar, row.avatarUrl, row.name);
-    const name = document.createElement('span');
-    name.className = 'name';
-    name.textContent = row.name;
-    const time = document.createElement('span');
-    time.className = 'time';
-    time.textContent = formatChatTime(row.time);
-    const msg = document.createElement('span');
-    msg.className = 'msg';
-    const preview = previewOf(row.last);
-    if (row.last && row.last.sender_id === me?.id && !row.last.deleted_at && !advFor(row.id)) {
-      msg.insertAdjacentHTML('beforeend', ICON_TICK);
-    }
-    if (preview.voice && !advFor(row.id)) {
-      msg.insertAdjacentHTML('beforeend', ICON_MIC);
-    }
-    const text = document.createElement('span');
-    text.className = 'txt';
-    text.textContent = advFor(row.id) ? 'Message masqué' : preview.text;
-    msg.append(text);
-    item.append(avatar, name, time, msg);
-    avatar.addEventListener('click', event => {
-      event.stopPropagation();
-      if (row.isGroup) openGroupInfo(row.id, row.name);
-      else if (row.otherId) openContactProfile(row.otherId);
-      else openRoom(row.id);
-    });
-    item.onclick = () => openRoom(row.id);
-    box.append(item);
-  });
-}
 async function loadChats() {
   if (!me || !db) return;
   if (!$('chats')) return;
@@ -797,7 +676,14 @@ async function loadChats() {
     .select('conversation_id, role')
     .eq('user_id', me.id)
     .limit(100);
-  if (error) throw error;
+  if (error) {
+    if (isNetworkError(error)) {
+      chatRows = cacheGet('chats') || [];
+      renderChatList();
+      return;
+    }
+    throw error;
+  }
   const rows = await Promise.all((memberships || []).map(async membership => {
     const id = membership.conversation_id;
     const { data: conversation, error: conversationError } = await db
@@ -865,6 +751,11 @@ async function loadChats() {
   chatRows = rows
     .filter(Boolean)
     .sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
+  chatRows.forEach(item => {
+    if (prefs.lastRead[item.id] === undefined) prefs.lastRead[item.id] = Date.now();
+  });
+  savePrefs();
+  cacheSet('chats', chatRows);
   renderChatList();
 }
 $('refresh')?.addEventListener('click', async () => {
@@ -944,7 +835,10 @@ function ncRender() {
   const matches = person => !query ||
     (person.full_name || '').toLowerCase().includes(query);
   $('ncActions').hidden = ncMode === 'group' || Boolean(query);
-  const people = phoneMode ? ncPhoneResults : ncPeople.filter(matches);
+  const known = ncPeople.filter(matches);
+  const extra = ncPhoneResults.filter(person => !known.some(item => item.id === person.id));
+  const extraIds = new Set(extra.map(person => person.id));
+  const people = phoneMode ? ncPhoneResults : [...known, ...extra];
   const addTitle = text => {
     const title = document.createElement('h4');
     title.className = 'nc-title';
@@ -973,7 +867,7 @@ function ncRender() {
     addTitle(
       phoneMode && phoneDigits(rawQuery).length < MIN_PHONE_DIGITS
         ? 'Entrez le numéro complet'
-        : people.length ? 'Résultats' : 'Aucun résultat'
+        : people.length ? 'Résultats' : 'Aucun résultat (numéro complet ou nom d’utilisateur exact)'
     );
   }
   const sections = new Map();
@@ -993,11 +887,14 @@ function ncRender() {
       body.append(title);
     }
     body.append(ncGroupCard(
-      sections.get(letter).map(person => ncItem(person, phoneMode
-        ? { sub: formatPhone(person.phone), addContact: true }
+      sections.get(letter).map(person => ncItem(person, (phoneMode || extraIds.has(person.id))
+        ? { sub: person.phone ? formatPhone(person.phone) : '@' + person.username, addContact: true }
         : {}))
     ));
   });
+  if (!query) {
+    body.append(scopeNote('Pour trouver une personne, entrez son numéro complet ou son nom d’utilisateur exact.'));
+  }
   if (ncMode === 'group') {
     const label = ncAddTo ? 'Ajouter' : 'Créer le groupe';
     $('ncGroupGo').textContent = ncSelected.size ? label + ' (' + ncSelected.size + ')' : label;
@@ -1035,14 +932,7 @@ async function openNewChat(mode = 'chat', addTo = null) {
   document.body.style.overflow = 'hidden';
   $('ncBody').textContent = 'Chargement…';
   try {
-    const { data, error } = await db
-      .from('profiles')
-      .select('id, username, full_name, avatar_url')
-      .neq('id', me.id)
-      .order('full_name', { ascending: true })
-      .limit(1000);
-    if (error) throw error;
-    ncPeople = data || [];
+    ncPeople = await loadKnownPeople();
     if (addTo) {
       const { data: current, error: currentError } = await db
         .from('conversation_members').select('user_id').eq('conversation_id', addTo);
@@ -1069,19 +959,18 @@ $('newChat')?.addEventListener('click', event => {
 $('ncSearch')?.addEventListener('input', () => {
   clearTimeout(ncPhoneTimer);
   const raw = $('ncSearch').value;
-  if (!isPhoneQuery(raw) || phoneDigits(raw).length < MIN_PHONE_DIGITS) {
-    ncPhoneResults = [];
-    ncRender();
-    return;
-  }
+  const typed = raw.trim().replace(/^@/, '');
+  const phoneQuery = isPhoneQuery(raw) && phoneDigits(raw).length >= MIN_PHONE_DIGITS;
+  const nameQuery = !isPhoneQuery(raw) && USERNAME_RE.test(typed);
   ncPhoneResults = [];
   ncRender();
+  if (!phoneQuery && !nameQuery) return;
   ncPhoneTimer = setTimeout(async () => {
     try {
-      ncPhoneResults = await searchByPhone(raw);
+      ncPhoneResults = await findProfiles(raw);
     } catch (error) {
       ncPhoneResults = [];
-      console.warn('Recherche par numéro:', error.message || error);
+      console.warn('Recherche de contact:', error.message || error);
     }
     if ($('ncSearch').value === raw) ncRender();
   }, 350);
@@ -1159,6 +1048,9 @@ async function openRoom(id) {
     sessionUnlocked.add(id);
   }
   room = id;
+  prefs.lastRead[id] = Date.now();
+  delete prefs.unread[id];
+  savePrefs();
   $show('home', false);
   $show('room', true);
   const { data, error } = await db
@@ -1166,7 +1058,7 @@ async function openRoom(id) {
     .select(FEATURE.convExpiry ? 'id, title, is_group, ephemeral_seconds' : 'id, title, is_group')
     .eq('id', id)
     .maybeSingle();
-  if (error) {
+  if (error && !isNetworkError(error)) {
     errorMessage(error);
     return;
   }
@@ -1202,6 +1094,10 @@ async function openRoom(id) {
 }
 $('back')?.addEventListener('click', async () => {
   cancelVoiceRecording();
+  if (room) {
+    prefs.lastRead[room] = Date.now();
+    savePrefs();
+  }
   room = null;
   if (roomChannel && db) {
     await db.removeChannel(roomChannel);
@@ -1224,11 +1120,20 @@ async function loadMessages() {
     .eq('conversation_id', room)
     .order('created_at', { ascending: true })
     .limit(150);
-  if (error) throw error;
-  for (const message of data || []) {
+  let list = data;
+  if (error) {
+    if (!isNetworkError(error)) throw error;
+    list = cacheGet('msgs.' + room) || [];
+  } else {
+    cacheSet('msgs.' + room, (data || []).slice(-80));
+  }
+  const clearedAt = prefs.clearedAt[room] || 0;
+  for (const message of list || []) {
     if (isExpired(message)) continue;
+    if (new Date(message.created_at).getTime() <= clearedAt) continue;
     await renderMessage(message, box);
   }
+  await renderPendingForRoom();
   box.scrollTop = box.scrollHeight;
 }
 async function renderMessage(message, box) {
@@ -1596,105 +1501,12 @@ function showPhoto(url, label) {
   document.body.append(view);
 }
 async function openContactProfile(userId) {
-  if (!userId || !db) return;
-  let person = null;
-  try {
-    const { data, error } = await db
-      .from('profiles')
-      .select(profileCols())
-      .eq('id', userId)
-      .maybeSingle();
-    if (error) throw error;
-    person = data;
-  } catch (error) {
-    errorMessage(error);
-    return;
-  }
-  if (!person) {
-    notify('Profil introuvable.');
-    return;
-  }
-  const label = person.full_name || person.username || 'Utilisateur';
-  const isMe = person.id === me?.id;
-  sheetOpen(isMe ? 'Mon profil' : 'Infos du contact', body => {
-    const card = document.createElement('div');
-    card.className = 'pf-card';
-    const avatar = document.createElement('span');
-    avatar.className = 'avatar pf-av';
-    setAvatar(avatar, person.avatar_url, label);
-    if (person.avatar_url) {
-      avatar.classList.add('zoomable');
-      avatar.addEventListener('click', () => showPhoto(person.avatar_url, label));
-    }
-    const name = document.createElement('h3');
-    name.textContent = label + (isMe ? ' (vous)' : '');
-    card.append(avatar, name);
-    if (person.phone) {
-      const phone = document.createElement('p');
-      phone.className = 'pf-phone';
-      phone.textContent = formatPhone(person.phone);
-      card.append(phone);
-    }
-    if (person.bio) {
-      const bio = document.createElement('p');
-      bio.className = 'pf-bio';
-      bio.textContent = person.bio;
-      card.append(bio);
-    }
-    body.append(card);
-    if (!isMe) {
-      const go = document.createElement('button');
-      go.type = 'button';
-      go.className = 'pf-go';
-      go.textContent = room && roomOtherId === person.id ? 'Retour à la discussion' : 'Envoyer un message';
-      go.addEventListener('click', () => {
-        closeSheet();
-        if (!(room && roomOtherId === person.id)) startPrivateChat(person.id);
-      });
-      body.append(go);
-    }
-  });
+  if (!userId) return;
+  return openInfoPage({ userId, convId: room && roomOtherId === userId ? room : null });
 }
 async function openGroupInfo(conversationId, title) {
-  if (!conversationId || !db) return;
-  try {
-    const { data: members, error } = await db
-      .from('conversation_members')
-      .select('user_id')
-      .eq('conversation_id', conversationId);
-    if (error) throw error;
-    const ids = (members || []).map(item => item.user_id);
-    let people = [];
-    if (ids.length) {
-      const result = await db.from('profiles').select(profileCols()).in('id', ids);
-      if (result.error) throw result.error;
-      people = result.data || [];
-    }
-    sheetOpen(title || 'Groupe', body => {
-      body.append(scopeNote(people.length + ' participant' + (people.length > 1 ? 's' : '')));
-      const list = document.createElement('div');
-      list.className = 'pf-members';
-      people.forEach(person => {
-        const label = person.full_name || person.username || 'Utilisateur';
-        const row = optRow(label + (person.id === me?.id ? ' (vous)' : ''),
-          person.phone ? formatPhone(person.phone) : '', () => openContactProfile(person.id));
-        const avatar = document.createElement('span');
-        avatar.className = 'avatar';
-        setAvatar(avatar, person.avatar_url, label);
-        row.prepend(avatar);
-        list.append(row);
-      });
-      body.append(list);
-      body.append(optRow('➕ Ajouter des participants', '›', () => {
-        closeSheet();
-        openNewChat('group', conversationId);
-      }));
-      body.append(optRow('✏️ Renommer le groupe', '›', () => renameGroup(conversationId, title)));
-      body.append(optRow('🚪 Quitter le groupe', '', () => leaveGroup(conversationId)));
-    });
-  } catch (error) {
-    errorMessage(error);
-  }
+  if (!conversationId) return;
+  return openInfoPage({ group: true, convId: conversationId, title });
 }
 function groupRpcError(error) {
   const text = String(error?.message || error);
@@ -1769,59 +1581,24 @@ $('sendForm')?.addEventListener('submit', async event => {
   }
   setBusy(button, true, '…');
   try {
-    let mediaPath = null;
-    let mediaName = null;
-    let mediaSize = null;
     let type = 'text';
+    let extension = 'bin';
     if (file) {
-      const extension = file.name.includes('.')
-        ? file.name.split('.').pop().toLowerCase()
-        : 'bin';
-      const safeName =
-        crypto.randomUUID() + '.' + extension;
-      mediaPath = room + '/' + safeName;
-      mediaName = file.name;
-      mediaSize = file.size;
-      if (file.type.startsWith('image/')) {
-        type = 'image';
-      } else if (file.type.startsWith('video/')) {
-        type = 'video';
-      } else if (file.type.startsWith('audio/')) {
-        type = 'voice';
-      } else {
-        type = 'file';
-      }
-      const { error: uploadError } = await db.storage
-        .from('media')
-        .upload(mediaPath, file, {
-          contentType: file.type || 'application/octet-stream',
-          upsert: false
-        });
-      if (uploadError) throw uploadError;
+      extension = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : 'bin';
+      if (file.type.startsWith('image/')) type = 'image';
+      else if (file.type.startsWith('video/')) type = 'video';
+      else if (file.type.startsWith('audio/')) type = 'voice';
+      else type = 'file';
     }
-    const payload = {
-      conversation_id: room,
-      sender_id: me.id,
-      content: text || null,
+    await sendJob({
+      room,
       type,
-      media_path: mediaPath,
-      media_name: mediaName,
-      media_size: mediaSize,
-      ...expiryFields(room)
-    };
-    const { error } = await db
-      .from('messages')
-      .insert(payload);
-    if (error) {
-      /*
-       * Si la base refuse le message après le téléversement,
-       * on tente de supprimer le fichier qui vient d'être envoyé.
-       */
-      if (mediaPath) {
-        await db.storage.from('media').remove([mediaPath]);
-      }
-      throw error;
-    }
+      content: text,
+      blob: file || null,
+      mime: file?.type,
+      ext: extension,
+      mediaName: file?.name || null
+    });
     $('messageText').value = '';
     $('attachment').value = '';
     $('selectedFile').textContent = '';
@@ -2034,26 +1811,16 @@ async function handleVoiceStop(recorder) {
     notify('Le message vocal dépasse la limite de 25 Mo.');
     return;
   }
-  const path = voiceRoom + '/' + crypto.randomUUID() + '.' + extension;
   try {
-    const { error: uploadError } = await db.storage
-      .from('media')
-      .upload(path, blob, { contentType: mime, upsert: false });
-    if (uploadError) throw uploadError;
-    const { error } = await db.from('messages').insert({
-      conversation_id: voiceRoom,
-      sender_id: me.id,
-      content: null,
+    await sendJob({
+      room: voiceRoom,
       type: 'voice',
-      media_path: path,
-      media_name: 'Message vocal',
-      media_size: blob.size,
-      ...expiryFields(voiceRoom)
+      content: null,
+      blob,
+      mime,
+      ext: extension,
+      mediaName: 'Message vocal'
     });
-    if (error) {
-      await db.storage.from('media').remove([path]);
-      throw error;
-    }
     if (room === voiceRoom) await loadMessages();
   } catch (error) {
     errorMessage(error);
@@ -2170,7 +1937,7 @@ async function loadStatuses() {
   if (!$('statusStrip')) return;
   const { data, error } = await db
     .from('statuses')
-    .select('id, user_id, type, content, media_path, created_at, expires_at')
+    .select('*')
     .gt('expires_at', new Date().toISOString())
     .order('created_at', { ascending: true })
     .limit(300);
@@ -2220,7 +1987,7 @@ function statusCard(group, own) {
         '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>');
     } else {
       bg.classList.add('text');
-      bg.style.background = avatarColor(group.userId + 'x');
+      bg.style.background = last.bg || avatarColor(group.userId + 'x');
       const snippet = document.createElement('span');
       snippet.textContent = last.content || '';
       bg.append(snippet);
@@ -2299,8 +2066,7 @@ function clearStatusPreview() {
   $('statusPreview')?.replaceChildren();
 }
 function openStatusComposer(focusText) {
-  $('statusComposer').hidden = false;
-  if (focusText) setTimeout(() => $('statusText')?.focus(), 50);
+  openStatusStart(focusText ? 'text' : undefined);
 }
 function closeStatusComposer() {
   $('statusComposer').hidden = true;
@@ -2308,7 +2074,7 @@ function closeStatusComposer() {
   $('statusMedia').value = '';
   clearStatusPreview();
 }
-$('statusCamera')?.addEventListener('click', () => $('statusMedia')?.click());
+$('statusCamera')?.addEventListener('click', () => openStatusStart());
 $('statusPen')?.addEventListener('click', () => openStatusComposer(true));
 $('statusCancel')?.addEventListener('click', closeStatusComposer);
 $('statusComposer')?.addEventListener('click', event => {
@@ -2423,7 +2189,7 @@ async function showViewerStatus() {
   if (!hasMedia) {
     const box = document.createElement('div');
     box.className = 'v-text';
-    box.style.background = avatarColor(group.userId + 'x');
+    box.style.background = item.bg || avatarColor(group.userId + 'x');
     box.textContent = item.content || '';
     stage.append(box);
     startTimer(5000);
@@ -2651,7 +2417,17 @@ const PREFS_DEFAULT = () => ({
   pinSalt: '',
   pinHash: '',
   starred: {},
-  hidden: {}
+  hidden: {},
+  unread: {},
+  lastRead: {},
+  archived: {},
+  muted: {},
+  favorites: {},
+  lists: {},
+  clearedAt: {},
+  deletedRooms: {},
+  sound: { person: 'cristal', group: 'goutte', vibrate: true },
+  stAudience: { mode: 'contacts', ids: [] }
 });
 let prefs = PREFS_DEFAULT();
 const prefsKey = () => 'truechat.prefs.' + (me?.id || 'anon');
@@ -2663,7 +2439,9 @@ function loadPrefs() {
       ...prefs, ...raw,
       theme: { ...prefs.theme, ...(raw.theme || {}) },
       ephemeral: { ...prefs.ephemeral, ...(raw.ephemeral || {}) },
-      adv: { ...prefs.adv, ...(raw.adv || {}) }
+      adv: { ...prefs.adv, ...(raw.adv || {}) },
+      sound: { ...prefs.sound, ...(raw.sound || {}) },
+      stAudience: { ...prefs.stAudience, ...(raw.stAudience || {}) }
     };
   } catch (error) {
     console.warn('Préférences illisibles:', error);
@@ -2688,6 +2466,10 @@ function clearLockPrefs() {
 const FEATURE = { expiry: false, convExpiry: false };
 async function probeFeatures() {
   if (!db) return;
+  if (!navigator.onLine) {
+    Object.assign(FEATURE, cacheGet('features') || {});
+    return;
+  }
   try {
     const { error } = await db.from('messages').select('expires_at').limit(1);
     FEATURE.expiry = !error;
@@ -2700,6 +2482,7 @@ async function probeFeatures() {
   } catch (error) {
     FEATURE.convExpiry = false;
   }
+  cacheSet('features', FEATURE);
 }
 
 /* ---------- Valeurs effectives (discussion > général) ---------- */
@@ -3699,6 +3482,1673 @@ $('lockToggle')?.addEventListener('change', async () => {
 });
 
 /* =====================================================
+   V3 — OUTILS COMMUNS
+===================================================== */
+function mk(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+const isNetworkError = error =>
+  !navigator.onLine ||
+  /failed to fetch|networkerror|load failed|network request failed|fetch failed/i
+    .test(String(error?.message || error));
+
+/* Écran stable : pas de zoom au pincement (en plus de la balise viewport et du CSS) */
+['gesturestart', 'gesturechange', 'gestureend'].forEach(name =>
+  document.addEventListener(name, event => event.preventDefault()));
+document.addEventListener('touchmove', event => {
+  if (event.touches.length > 1) event.preventDefault();
+}, { passive: false });
+document.addEventListener('wheel', event => {
+  if (event.ctrlKey) event.preventDefault();
+}, { passive: false });
+
+/* =====================================================
+   V3 — HORS-LIGNE : cache local + file d'attente d'envoi
+===================================================== */
+const cacheKey = name => 'tc.cache.' + name + '.' + (me?.id || 'anon');
+function cacheSet(name, value) {
+  try {
+    localStorage.setItem(cacheKey(name), JSON.stringify(value));
+  } catch (error) {
+    /* stockage plein : on ignore */
+  }
+}
+function cacheGet(name) {
+  try {
+    return JSON.parse(localStorage.getItem(cacheKey(name)) || 'null');
+  } catch (error) {
+    return null;
+  }
+}
+function storedUser() {
+  try {
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (/^sb-.*-auth-token$/.test(key)) {
+        const value = JSON.parse(localStorage.getItem(key) || 'null');
+        if (value?.user?.id) return value.user;
+      }
+    }
+  } catch (error) {
+    /* ignore */
+  }
+  return null;
+}
+function idb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('truechat', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('outbox', { keyPath: 'id' });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+async function outboxWrite(fn) {
+  const database = await idb();
+  return new Promise((resolve, reject) => {
+    const tx = database.transaction('outbox', 'readwrite');
+    fn(tx.objectStore('outbox'));
+    tx.oncomplete = () => { database.close(); resolve(); };
+    tx.onerror = () => { database.close(); reject(tx.error); };
+  });
+}
+const outboxAdd = job => outboxWrite(store => store.put(job));
+const outboxDelete = id => outboxWrite(store => store.delete(id));
+async function outboxAll() {
+  const database = await idb();
+  return new Promise((resolve, reject) => {
+    const request = database.transaction('outbox').objectStore('outbox').getAll();
+    request.onsuccess = () => { database.close(); resolve(request.result || []); };
+    request.onerror = () => { database.close(); reject(request.error); };
+  });
+}
+/* Envoie un message (texte ou média). Lance une erreur si la base refuse. */
+async function deliverJob(job) {
+  let mediaPath = null;
+  if (job.blob) {
+    mediaPath = job.room + '/' + crypto.randomUUID() + '.' + (job.ext || 'bin');
+    const { error: uploadError } = await db.storage
+      .from('media')
+      .upload(mediaPath, job.blob, { contentType: job.mime || 'application/octet-stream', upsert: false });
+    if (uploadError) throw uploadError;
+  }
+  const { error } = await db.from('messages').insert({
+    conversation_id: job.room,
+    sender_id: me.id,
+    content: job.content || null,
+    type: job.type,
+    media_path: mediaPath,
+    media_name: job.mediaName || null,
+    media_size: job.blob ? job.blob.size : null,
+    ...expiryFields(job.room)
+  });
+  if (error) {
+    if (mediaPath) await db.storage.from('media').remove([mediaPath]);
+    throw error;
+  }
+}
+/* Envoie maintenant ; sans réseau, garde le message et l'enverra plus tard. */
+async function sendJob(job) {
+  job.id = crypto.randomUUID();
+  job.userId = me.id;
+  job.createdAt = Date.now();
+  job.attempts = 0;
+  try {
+    await deliverJob(job);
+    return 'sent';
+  } catch (error) {
+    if (!isNetworkError(error)) throw error;
+    await outboxAdd(job);
+    if (room === job.room) {
+      $('messages')?.append(pendingBubble(job));
+      $('messages').scrollTop = $('messages').scrollHeight;
+    }
+    return 'queued';
+  }
+}
+function pendingBubble(job) {
+  const bubble = mk('div', 'bubble mine pending');
+  bubble.dataset.pending = job.id;
+  const label = job.content ||
+    ({ image: '📷 Photo', video: '🎥 Vidéo', voice: '🎤 Message vocal', file: '📄 ' + (job.mediaName || 'Fichier') }[job.type] || 'Message');
+  bubble.append(mk('div', '', label), mk('small', '', '⏳ en attente de réseau'));
+  return bubble;
+}
+async function renderPendingForRoom() {
+  if (!room || !me) return;
+  try {
+    const jobs = (await outboxAll())
+      .filter(job => job.userId === me.id && job.room === room)
+      .sort((a, b) => a.createdAt - b.createdAt);
+    jobs.forEach(job => $('messages')?.append(pendingBubble(job)));
+  } catch (error) {
+    /* IndexedDB indisponible */
+  }
+}
+function updateNetBanner() {
+  const banner = $('netBanner');
+  if (banner) banner.hidden = navigator.onLine;
+}
+let flushing = false;
+async function flushOutbox() {
+  if (flushing || !me || !db || !navigator.onLine) return;
+  flushing = true;
+  try {
+    const jobs = (await outboxAll())
+      .filter(job => job.userId === me.id)
+      .sort((a, b) => a.createdAt - b.createdAt);
+    let sent = 0;
+    for (const job of jobs) {
+      try {
+        await deliverJob(job);
+        await outboxDelete(job.id);
+        sent += 1;
+      } catch (error) {
+        if (isNetworkError(error)) break;
+        job.attempts = (job.attempts || 0) + 1;
+        if (job.attempts >= 3) {
+          await outboxDelete(job.id);
+          notify('Un message n’a pas pu être envoyé : ' + (error.message || error));
+        } else {
+          await outboxAdd(job);
+        }
+      }
+    }
+    if (sent) {
+      if (room) await loadMessages().catch(() => {});
+      await loadChats().catch(() => {});
+    }
+  } catch (error) {
+    console.warn('Envoi différé:', error);
+  } finally {
+    flushing = false;
+  }
+}
+window.addEventListener('online', () => {
+  updateNetBanner();
+  flushOutbox();
+  loadChats().catch(() => {});
+});
+window.addEventListener('offline', updateNetBanner);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) flushOutbox();
+});
+setInterval(flushOutbox, 20000);
+updateNetBanner();
+
+/* =====================================================
+   V3 — SONS DE NOTIFICATION (app ouverte) + BANNIÈRE
+===================================================== */
+const TONES = {
+  cristal: { name: 'Cristal', notes: [[1318, 0, 0.14], [1760, 0.12, 0.28]] },
+  goutte: { name: 'Goutte', notes: [[660, 0, 0.1], [440, 0.09, 0.22]] },
+  carillon: { name: 'Carillon', notes: [[784, 0, 0.16], [988, 0.14, 0.16], [1175, 0.28, 0.3]] },
+  pop: { name: 'Pop', notes: [[520, 0, 0.06], [780, 0.05, 0.1]] },
+  radar: { name: 'Radar', notes: [[600, 0, 0.12], [600, 0.2, 0.12], [900, 0.4, 0.25]] },
+  none: { name: 'Aucun son', notes: [] }
+};
+let audioCtx = null;
+function audioContext() {
+  if (!audioCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    audioCtx = new Ctx();
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+  return audioCtx;
+}
+['pointerdown', 'touchstart', 'keydown'].forEach(name =>
+  document.addEventListener(name, () => audioContext(), { once: true, passive: true }));
+function playTone(id) {
+  const tone = TONES[id];
+  if (!tone || !tone.notes.length) return;
+  const ctx = audioContext();
+  if (!ctx) return;
+  const t0 = ctx.currentTime + 0.02;
+  tone.notes.forEach(([freq, at, duration]) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.0001, t0 + at);
+    gain.gain.exponentialRampToValueAtTime(0.35, t0 + at + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + at + duration);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(t0 + at);
+    osc.stop(t0 + at + duration + 0.05);
+  });
+}
+function messageAlert(kind) {
+  playTone(prefs.sound?.[kind] || (kind === 'group' ? 'goutte' : 'cristal'));
+  if (prefs.sound?.vibrate !== false && navigator.vibrate) navigator.vibrate([120, 60, 120]);
+}
+function openSoundsSheet() {
+  optScope = null;
+  sheetOpen('Sons de notification', body => {
+    body.append(scopeNote(
+      'Ces sons jouent quand l’app est ouverte. Quand elle est fermée, le téléphone utilise son propre son de notification.'
+    ));
+    [['person', 'Messages privés'], ['group', 'Groupes']].forEach(([kind, label]) => {
+      body.append(mk('h4', 'opt-sub', label));
+      Object.entries(TONES).forEach(([id, tone]) => {
+        body.append(optRow(tone.name, '', () => {
+          prefs.sound[kind] = id;
+          savePrefs();
+          playTone(id);
+          openSoundsSheet();
+        }, { selected: prefs.sound[kind] === id }));
+      });
+    });
+    body.append(optRow('Vibration', prefs.sound.vibrate !== false ? 'Oui' : 'Non', () => {
+      prefs.sound.vibrate = prefs.sound.vibrate === false;
+      savePrefs();
+      openSoundsSheet();
+    }));
+  });
+}
+let inboxChannel = null;
+let inboxTimer = null;
+function startInbox() {
+  if (inboxChannel || !db || !me) return;
+  inboxChannel = db.channel('inbox-' + me.id)
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' },
+      payload => onIncoming(payload.new))
+    .subscribe();
+}
+function stopInbox() {
+  if (inboxChannel && db) db.removeChannel(inboxChannel);
+  inboxChannel = null;
+}
+function showBanner(title, text, roomId) {
+  const banner = $('inBanner');
+  if (!banner) return;
+  banner.replaceChildren(mk('b', '', title), mk('span', '', text));
+  banner.hidden = false;
+  banner.onclick = () => {
+    banner.hidden = true;
+    openRoom(roomId);
+  };
+  clearTimeout(showBanner.timer);
+  showBanner.timer = setTimeout(() => { banner.hidden = true; }, 4500);
+}
+function onIncoming(message) {
+  if (!message || !me || message.sender_id === me.id || isExpired(message)) return;
+  clearTimeout(inboxTimer);
+  inboxTimer = setTimeout(() => loadChats().catch(() => {}), 600);
+  const watching = room === message.conversation_id && !document.hidden;
+  if (watching || prefs.muted[message.conversation_id]) return;
+  const row = chatRows.find(item => item.id === message.conversation_id);
+  messageAlert(row?.isGroup ? 'group' : 'person');
+  showBanner(
+    row?.name || 'Nouveau message',
+    advFor(message.conversation_id) ? 'Message masqué' : (previewOf(message).text || 'Nouveau message'),
+    message.conversation_id
+  );
+}
+
+/* =====================================================
+   V3 — LISTE DES DISCUSSIONS : appui long, non lu, archives, favoris, listes
+===================================================== */
+function chatUnread(row) {
+  if (prefs.unread[row.id]) return true;
+  if (!row.last || row.last.sender_id === me?.id || row.last.deleted_at) return false;
+  return new Date(row.last.created_at).getTime() > (prefs.lastRead[row.id] || 0);
+}
+function chatVisible(row) {
+  const deleted = prefs.deletedRooms[row.id];
+  return !(deleted && new Date(row.time || 0).getTime() <= deleted);
+}
+let longPressAt = 0;
+function attachLongPress(el, action) {
+  let timer = null;
+  let x0 = 0;
+  let y0 = 0;
+  const cancel = () => clearTimeout(timer);
+  el.addEventListener('pointerdown', event => {
+    x0 = event.clientX;
+    y0 = event.clientY;
+    cancel();
+    timer = setTimeout(() => {
+      longPressAt = Date.now();
+      if (navigator.vibrate) navigator.vibrate(15);
+      action();
+    }, 500);
+  });
+  el.addEventListener('pointermove', event => {
+    if (Math.abs(event.clientX - x0) > 10 || Math.abs(event.clientY - y0) > 10) cancel();
+  });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(name => el.addEventListener(name, cancel));
+  el.addEventListener('contextmenu', event => {
+    event.preventDefault();
+    longPressAt = Date.now();
+    action();
+  });
+}
+function setChatFilter(filter) {
+  chatFilter = filter;
+  document.querySelectorAll('.chip[data-filter]').forEach(chip => {
+    chip.classList.toggle('on', chip.dataset.filter === filter);
+  });
+  renderChatList();
+}
+function renderListChips() {
+  const holder = document.querySelector('.chips');
+  if (!holder) return;
+  holder.querySelectorAll('.chip.dyn').forEach(chip => chip.remove());
+  Object.keys(prefs.lists).forEach(name => {
+    const chip = mk('button', 'chip dyn' + (chatFilter === 'list:' + name ? ' on' : ''), name);
+    chip.type = 'button';
+    chip.dataset.filter = 'list:' + name;
+    chip.addEventListener('click', () => setChatFilter('list:' + name));
+    holder.append(chip);
+  });
+}
+function renderChatList() {
+  const box = $('chats');
+  if (!box) return;
+  box.replaceChildren();
+  const visibleRows = chatRows.filter(chatVisible);
+  const groupCount = visibleRows.filter(row => row.isGroup && !prefs.archived[row.id]).length;
+  if ($('groupsCount')) $('groupsCount').textContent = groupCount ? String(groupCount) : '';
+  renderListChips();
+  const archivedCount = visibleRows.filter(row => prefs.archived[row.id]).length;
+  const archivedRow = $('archivedRow');
+  if (archivedRow) {
+    archivedRow.hidden = !archivedCount && chatFilter !== 'archived';
+    const label = archivedRow.querySelector('.t');
+    if (label) {
+      label.textContent = chatFilter === 'archived'
+        ? '← Retour aux discussions'
+        : 'Archivées' + (archivedCount ? ' (' + archivedCount + ')' : '');
+    }
+  }
+  const rows = visibleRows.filter(row => {
+    const archived = Boolean(prefs.archived[row.id]);
+    if (chatFilter === 'archived') {
+      if (!archived) return false;
+    } else if (archived) {
+      return false;
+    }
+    if (chatFilter === 'groups' && !row.isGroup) return false;
+    if (chatFilter === 'unread' && !chatUnread(row)) return false;
+    if (chatFilter === 'favorites' && !prefs.favorites[row.id]) return false;
+    if (chatFilter.startsWith('list:') &&
+        !(prefs.lists[chatFilter.slice(5)] || []).includes(row.id)) return false;
+    if (chatQuery && !row.name.toLowerCase().includes(chatQuery)) return false;
+    if (showLockedList ? !isRoomLocked(row.id) : isRoomLocked(row.id)) return false;
+    return true;
+  });
+  const lockedCount = chatRows.filter(row => isRoomLocked(row.id)).length;
+  if (lockedCount && !chatQuery) {
+    const lockRow = mk('button', 'chat-row');
+    lockRow.type = 'button';
+    lockRow.style.cssText = 'grid-template-columns:1fr;padding:14px 16px;font-weight:700;text-align:left;';
+    lockRow.textContent = showLockedList
+      ? '← Retour aux discussions'
+      : '🔒 Discussions verrouillées (' + lockedCount + ')';
+    lockRow.onclick = async () => {
+      if (showLockedList) {
+        showLockedList = false;
+      } else {
+        if (!(await verifyPin('Discussions verrouillées'))) return;
+        showLockedList = true;
+      }
+      renderChatList();
+    };
+    box.append(lockRow);
+  }
+  if (!rows.length) {
+    const empty = mk('p', 'empty');
+    empty.textContent = chatRows.length
+      ? 'Aucune discussion ne correspond.'
+      : 'Aucune conversation. Appuyez sur + pour trouver une personne par son numéro ou son nom d’utilisateur.';
+    box.append(empty);
+    return;
+  }
+  rows.forEach(row => {
+    const unread = chatUnread(row);
+    const item = mk('button', 'chat-row' + (unread ? ' unread' : ''));
+    item.type = 'button';
+    const avatar = mk('span', 'avatar');
+    setAvatar(avatar, row.avatarUrl, row.name);
+    const name = mk('span', 'name', row.name + (prefs.muted[row.id] ? ' 🔕' : '') + (prefs.favorites[row.id] ? ' ♥' : ''));
+    const time = mk('span', 'time', formatChatTime(row.time));
+    const msg = mk('span', 'msg');
+    const cleared = prefs.clearedAt[row.id] || 0;
+    const last = row.last && new Date(row.last.created_at).getTime() > cleared ? row.last : null;
+    const preview = previewOf(last);
+    if (last && last.sender_id === me?.id && !last.deleted_at && !advFor(row.id)) {
+      msg.insertAdjacentHTML('beforeend', ICON_TICK);
+    }
+    if (preview.voice && !advFor(row.id)) msg.insertAdjacentHTML('beforeend', ICON_MIC);
+    msg.append(mk('span', 'txt', advFor(row.id) ? 'Message masqué' : preview.text));
+    item.append(avatar, name, time, msg);
+    if (unread) item.append(mk('i', 'unread-dot'));
+    avatar.addEventListener('click', event => {
+      event.stopPropagation();
+      if (row.isGroup) openGroupInfo(row.id, row.name);
+      else if (row.otherId) openContactProfile(row.otherId);
+      else openRoom(row.id);
+    });
+    attachLongPress(item, () => openChatMenu(row));
+    item.onclick = () => {
+      if (Date.now() - longPressAt < 700) return;
+      openRoom(row.id);
+    };
+    box.append(item);
+  });
+}
+function openChatMenu(row) {
+  optScope = row.id;
+  const danger = button => {
+    button.style.color = '#ff5a5a';
+    return button;
+  };
+  const act = (label, icon, fn, isDanger) => {
+    const button = optRow(label, icon, async () => {
+      closeSheet();
+      await fn();
+      savePrefs();
+      renderChatList();
+    });
+    return isDanger ? danger(button) : button;
+  };
+  const unread = chatUnread(row);
+  sheetOpen(row.name, body => {
+    body.append(
+      act(unread ? 'Marquer comme lu' : 'Marquer comme non lu', '●', () => {
+        if (unread) {
+          delete prefs.unread[row.id];
+          prefs.lastRead[row.id] = Date.now();
+        } else {
+          prefs.unread[row.id] = true;
+        }
+      }),
+      act(prefs.archived[row.id] ? 'Désarchiver' : 'Archiver', '🗄', () => {
+        if (prefs.archived[row.id]) delete prefs.archived[row.id];
+        else prefs.archived[row.id] = true;
+      }),
+      act(prefs.muted[row.id] ? 'Réactiver le son' : 'Mode silencieux', '🔕', () => {
+        if (prefs.muted[row.id]) delete prefs.muted[row.id];
+        else prefs.muted[row.id] = true;
+      }),
+      act(isRoomLocked(row.id) ? 'Déverrouiller la discussion' : 'Verrouiller la discussion', '🔒', async () => {
+        await toggleRoomLock(row.id);
+      }),
+      act(prefs.favorites[row.id] ? 'Retirer des favoris' : 'Ajouter aux favoris', '♥', () => {
+        if (prefs.favorites[row.id]) delete prefs.favorites[row.id];
+        else prefs.favorites[row.id] = true;
+      })
+    );
+    body.append(optRow('Ajouter à la liste', '›', () => openListsSheet(row)));
+    if (!row.isGroup && row.otherId) {
+      body.append(act('Bloquer ' + row.name, '⛔', () => blockUser(row.otherId)));
+    }
+    body.append(
+      act('Effacer la discussion', '✖', () => {
+        if (!confirm('Effacer tous les messages de cette discussion sur cet appareil ?')) return;
+        prefs.clearedAt[row.id] = Date.now();
+        if (room === row.id) loadMessages().catch(() => {});
+      }),
+      act('Supprimer la discussion', '🗑', () => deleteDiscussion(row), true)
+    );
+  });
+}
+async function deleteDiscussion(row) {
+  if (!confirm(row.isGroup ? 'Quitter et supprimer ce groupe ?' : 'Supprimer cette discussion ?')) return;
+  if (row.isGroup) {
+    const { error } = await db.rpc('leave_group', { group_id: row.id });
+    if (error) {
+      groupRpcError(error);
+      return;
+    }
+  }
+  prefs.deletedRooms[row.id] = Date.now();
+  prefs.clearedAt[row.id] = Date.now();
+  savePrefs();
+  notify('Discussion supprimée.');
+}
+async function blockUser(userId) {
+  if (!confirm('Bloquer cette personne ?')) return;
+  const { error } = await db.from('blocked_users').insert({ blocker_id: me.id, blocked_id: userId });
+  if (error && error.code !== '23505') {
+    errorMessage(error);
+    return;
+  }
+  notify('Personne bloquée.');
+}
+async function unblockUser(userId) {
+  const { error } = await db.from('blocked_users').delete()
+    .eq('blocker_id', me.id).eq('blocked_id', userId);
+  if (error) errorMessage(error);
+  else notify('Personne débloquée.');
+}
+function openListsSheet(row) {
+  optScope = row.id;
+  sheetOpen('Ajouter à la liste', body => {
+    Object.keys(prefs.lists).forEach(name => {
+      const inList = prefs.lists[name].includes(row.id);
+      body.append(optRow(name, '', () => {
+        const list = prefs.lists[name];
+        prefs.lists[name] = inList ? list.filter(id => id !== row.id) : [...list, row.id];
+        savePrefs();
+        renderChatList();
+        openListsSheet(row);
+      }, { selected: inList }));
+    });
+    body.append(optRow('＋ Nouvelle liste', '', () => {
+      const name = (prompt('Nom de la liste (ex : Famille, Travail)') || '').trim().slice(0, 20);
+      if (!name || name.startsWith('list:')) return;
+      prefs.lists[name] = [...new Set([...(prefs.lists[name] || []), row.id])];
+      savePrefs();
+      renderChatList();
+      openListsSheet(row);
+    }));
+    Object.keys(prefs.lists).forEach(name => {
+      const remove = optRow('Supprimer la liste « ' + name + ' »', '🗑', () => {
+        delete prefs.lists[name];
+        if (chatFilter === 'list:' + name) chatFilter = 'all';
+        savePrefs();
+        renderChatList();
+        openListsSheet(row);
+      });
+      remove.style.color = '#ff5a5a';
+      body.append(remove);
+    });
+  });
+}
+
+/* =====================================================
+   V3 — RECHERCHE DE CONTACT : numéro complet ou nom d'utilisateur exact
+===================================================== */
+const USERNAME_RE = /^[a-z0-9_.]{3,30}$/i;
+async function findProfiles(raw) {
+  const text = String(raw || '').trim();
+  if (!text || !me) return [];
+  const phone = isPhoneQuery(text);
+  const digits = phone ? phoneDigits(text) : '';
+  const username = text.replace(/^@/, '');
+  if (phone && digits.length < MIN_PHONE_DIGITS) return [];
+  if (!phone && !USERNAME_RE.test(username)) return [];
+  const query = phone ? digits : username.toLowerCase();
+  const rpc = await db.rpc('find_profile', { q: query });
+  if (!rpc.error) return (rpc.data || []).filter(person => person.id !== me.id);
+  if (!/could not find the function|schema cache/i.test(rpc.error.message || '')) throw rpc.error;
+  // Fonction absente (SETUP-v3.sql pas encore exécuté) : recherche exacte directe
+  let request = db.from('profiles').select(profileCols()).neq('id', me.id).limit(5);
+  request = phone
+    ? request.eq('phone', digits)
+    : request.ilike('username', username.replace(/[%_\\]/g, char => '\\' + char));
+  const { data, error } = await request;
+  if (error) throw error;
+  return data || [];
+}
+async function loadKnownPeople() {
+  const ids = new Set();
+  const { data: contacts } = await db.from('contacts').select('contact_id').eq('owner_id', me.id);
+  (contacts || []).forEach(item => ids.add(item.contact_id));
+  chatRows.filter(row => !row.isGroup && row.otherId).forEach(row => ids.add(row.otherId));
+  ids.delete(me.id);
+  if (!ids.size) return [];
+  const { data, error } = await db
+    .from('profiles')
+    .select('id, username, full_name, avatar_url' + (HAS_PHONE ? ', phone' : ''))
+    .in('id', [...ids]);
+  if (error) throw error;
+  return (data || []).sort((a, b) =>
+    (a.full_name || a.username || '').localeCompare(b.full_name || b.username || ''));
+}
+
+/* =====================================================
+   V3 — PAGE D'INFORMATIONS (contact et groupe)
+===================================================== */
+const infoStack = [];
+let infoCurrent = null;
+function iconFrom(id) {
+  const svg = (typeof id === 'string' ? $(id) : id)?.querySelector('svg');
+  return svg ? svg.cloneNode(true) : mk('span', 'ri');
+}
+function infoRow(iconId, label, value, onClick, opts = {}) {
+  const button = mk('button', 'p-row');
+  button.type = 'button';
+  button.append(iconFrom(iconId), mk('span', 'rl', label), mk('span', 'rv', value || ''));
+  if (!opts.noChevron) button.append(mk('span', 'chev', '›'));
+  if (opts.danger) button.style.color = '#ff5a5a';
+  button.addEventListener('click', onClick);
+  return button;
+}
+async function openInfoPage(opts, push = true) {
+  if (!db || !me) return;
+  if (!opts.group && opts.userId === me.id) {
+    openProfilePage();
+    return;
+  }
+  if (push) {
+    if (infoCurrent && !$('infoPage').hidden) infoStack.push(infoCurrent);
+    else infoStack.length = 0;
+  }
+  infoCurrent = opts;
+  try {
+    await renderInfoPage();
+  } catch (error) {
+    errorMessage(error);
+    return;
+  }
+  $show('infoPage', true);
+}
+function closeInfoPage() {
+  if (infoStack.length) {
+    const previous = infoStack.pop();
+    openInfoPage(previous, false);
+    return;
+  }
+  infoCurrent = null;
+  $show('infoPage', false);
+}
+$('infoBack')?.addEventListener('click', closeInfoPage);
+async function renderInfoPage() {
+  const opts = infoCurrent;
+  const body = $('infoBody');
+  const isGroup = Boolean(opts.group);
+  let person = null;
+  let convId = opts.convId || null;
+  let members = [];
+  let blocked = false;
+  if (isGroup) {
+    const { data: rows, error } = await db.from('conversation_members').select('user_id').eq('conversation_id', convId);
+    if (error) throw error;
+    const ids = (rows || []).map(item => item.user_id);
+    if (ids.length) {
+      const result = await db.from('profiles').select(profileCols()).in('id', ids);
+      if (result.error) throw result.error;
+      members = result.data || [];
+    }
+  } else {
+    const { data, error } = await db.from('profiles').select(profileCols()).eq('id', opts.userId).maybeSingle();
+    if (error) throw error;
+    person = data;
+    if (!person) {
+      notify('Profil introuvable.');
+      throw new Error('Profil introuvable.');
+    }
+    convId = convId || chatRows.find(row => !row.isGroup && row.otherId === person.id)?.id || null;
+    opts.convId = convId;
+    const check = await db.from('blocked_users').select('blocked_id')
+      .eq('blocker_id', me.id).eq('blocked_id', person.id).maybeSingle();
+    blocked = Boolean(check.data);
+  }
+  const title = isGroup ? (opts.title || 'Groupe') : (person.full_name || person.username || 'Utilisateur');
+  $('infoTitle').textContent = isGroup ? 'Infos du groupe' : 'Informations';
+  body.replaceChildren();
+
+  const avatar = mk('span', 'avatar p-avatar');
+  setAvatar(avatar, isGroup ? chatRows.find(row => row.id === convId)?.avatarUrl : person.avatar_url, title);
+  const avatarUrl = isGroup ? null : person.avatar_url;
+  if (avatarUrl) avatar.addEventListener('click', () => showPhoto(avatarUrl, title));
+  const wrap = mk('div', 'pp-avatar');
+  wrap.append(avatar);
+  body.append(wrap, mk('h2', 'p-name', title));
+  if (isGroup) {
+    body.append(mk('p', 'p-user', 'Groupe · ' + members.length + ' participant' + (members.length > 1 ? 's' : '')));
+  } else {
+    body.append(mk('p', 'p-user', [person.phone ? formatPhone(person.phone) : '', person.username ? '@' + person.username : '']
+      .filter(Boolean).join(' · ')));
+    if (person.bio) body.append(mk('p', 'pf-bio', person.bio));
+  }
+
+  const actions = mk('div', 'p-actions');
+  const action = (iconSource, label, fn) => {
+    const button = mk('button');
+    button.type = 'button';
+    button.append(iconFrom(iconSource), mk('span', '', label));
+    button.addEventListener('click', fn);
+    actions.append(button);
+  };
+  action('profMessage', 'Message', async () => {
+    $show('infoPage', false);
+    infoStack.length = 0;
+    if (convId) {
+      if (room !== convId) await openRoom(convId);
+    } else if (person) {
+      startPrivateChat(person.id);
+    }
+  });
+  action('profMessage', 'Partager', async () => {
+    const text = isGroup ? title : title + (person.phone ? ' ' + formatPhone(person.phone) : '');
+    try {
+      if (navigator.share) await navigator.share({ title, text });
+      else {
+        await navigator.clipboard.writeText(text);
+        notify('Copié.');
+      }
+    } catch (error) {
+      if (error?.name !== 'AbortError') notify('Partage impossible.');
+    }
+  });
+  if (convId) action('profSearch', 'Rechercher', () => openRoomSearch(convId));
+  body.append(actions);
+
+  if (convId) {
+    const scope = fn => () => {
+      optScope = convId;
+      fn();
+    };
+    const group1 = mk('div', 'p-group glow');
+    group1.append(
+      infoRow('setMedia', 'Médias, liens et docs', '', scope(() => openMediaSheet())),
+      infoRow('setImportant', 'Important',
+        String(starredList().filter(item => item.conversation_id === convId).length || 'Aucun'),
+        scope(() => openImportantSheet()))
+    );
+    const group2 = mk('div', 'p-group glow');
+    group2.append(
+      infoRow('settingsNotifications', 'Notifications', prefs.muted[convId] ? 'Désactivées' : 'Activées', () => {
+        if (prefs.muted[convId]) delete prefs.muted[convId];
+        else prefs.muted[convId] = true;
+        savePrefs();
+        renderInfoPage();
+        renderChatList();
+      }),
+      infoRow('setTheme', 'Thème de la discussion', '', scope(() => openThemeSheet())),
+      infoRow('setSave', 'Enregistrer (Photos)', saveLabel(prefs.saveMode), scope(() => openSaveSheet()))
+    );
+    const group3 = mk('div', 'p-group glow');
+    const lockRow = mk('div', 'p-row static');
+    lockRow.append(iconFrom($('lockToggle')?.closest('.p-row')), mk('span', 'rl', 'Verrouiller la discussion'));
+    const sw = mk('label', 'switch');
+    const input = mk('input');
+    input.type = 'checkbox';
+    input.checked = isRoomLocked(convId);
+    input.addEventListener('change', async () => {
+      await toggleRoomLock(convId);
+      renderInfoPage();
+    });
+    sw.append(input, mk('i'));
+    lockRow.append(sw);
+    group3.append(
+      infoRow('setEphemeral', 'Messages éphémères', ephemeralLabel(ephemeralFor(convId)) === 'Non' ? 'Non' : ephemeralLabel(ephemeralFor(convId)),
+        scope(() => openEphemeralSheet())),
+      lockRow,
+      infoRow('settingsPrivacy', 'Confidentialité avancée', advFor(convId) ? 'Activée' : 'Désactivée', scope(() => openPrivacySheet())),
+      infoRow('setEncryption', 'Chiffrement', '', scope(() => openEncryptionSheet()))
+    );
+    body.append(group1, group2, group3);
+  }
+
+  if (isGroup) {
+    const list = mk('div', 'p-group glow');
+    members.forEach(member => {
+      const label = member.full_name || member.username || 'Utilisateur';
+      const button = mk('button', 'p-row');
+      button.type = 'button';
+      const av = mk('span', 'avatar sm');
+      setAvatar(av, member.avatar_url, label);
+      button.append(av, mk('span', 'rl', label + (member.id === me.id ? ' (vous)' : '')),
+        mk('span', 'rv', member.phone ? formatPhone(member.phone) : ''), mk('span', 'chev', '›'));
+      button.addEventListener('click', () => openInfoPage({ userId: member.id }));
+      list.append(button);
+    });
+    body.append(list);
+    const manage = mk('div', 'p-group glow');
+    manage.append(
+      infoRow($('setTheme'), '➕ Ajouter des participants', '', () => openNewChat('group', convId)),
+      infoRow($('setTheme'), '✏️ Renommer le groupe', '', () => renameGroup(convId, title)),
+      infoRow($('setTheme'), '🚪 Quitter le groupe', '', () => leaveGroup(convId), { danger: true, noChevron: true })
+    );
+    body.append(manage);
+  } else {
+    const danger = mk('div', 'p-group glow');
+    danger.append(infoRow($('settingsBlocked') || 'setTheme',
+      (blocked ? 'Débloquer ' : 'Bloquer ') + title, '', async () => {
+        if (blocked) await unblockUser(person.id);
+        else await blockUser(person.id);
+        renderInfoPage();
+      }, { danger: true, noChevron: true }));
+    body.append(danger);
+  }
+}
+async function openRoomSearch(convId) {
+  $show('infoPage', false);
+  infoStack.length = 0;
+  if (room !== convId) await openRoom(convId);
+  optScope = convId;
+  sheetOpen('Rechercher dans la discussion', body => {
+    const input = mk('input', 'pp-input');
+    input.type = 'search';
+    input.placeholder = 'Rechercher un mot…';
+    const results = mk('div');
+    body.append(input, results);
+    input.addEventListener('input', () => {
+      results.replaceChildren();
+      const term = input.value.trim().toLowerCase();
+      if (term.length < 2) return;
+      const hits = [...($('messages')?.querySelectorAll('.bubble') || [])]
+        .filter(bubble => bubble.textContent.toLowerCase().includes(term))
+        .slice(-30)
+        .reverse();
+      if (!hits.length) results.append(scopeNote('Aucun résultat.'));
+      hits.forEach(bubble => {
+        const text = bubble.textContent.trim();
+        results.append(optRow(text.length > 80 ? text.slice(0, 80) + '…' : text, '', () => {
+          closeSheet();
+          bubble.scrollIntoView({ block: 'center' });
+          bubble.classList.add('flash');
+          setTimeout(() => bubble.classList.remove('flash'), 1800);
+        }));
+      });
+    });
+    setTimeout(() => input.focus(), 60);
+  });
+}
+
+/* =====================================================
+   V3 — PAGE PROFIL (Vous → Modifier)
+===================================================== */
+let myLinks = null;     // null = colonne « links » indisponible
+let myLinksLoaded = false;
+async function loadMyLinks() {
+  try {
+    const { data, error } = await db.from('profiles').select('links').eq('id', me.id).maybeSingle();
+    myLinks = error ? null : (data?.links || '');
+  } catch (error) {
+    myLinks = null;
+  }
+  myLinksLoaded = true;
+  renderProfilePage();
+}
+function openProfilePage() {
+  if (!profile) return;
+  renderProfilePage();
+  $show('profilePage', true);
+  if (!myLinksLoaded) loadMyLinks();
+}
+function closeProfilePage() {
+  $show('profilePage', false);
+}
+$('ppBack')?.addEventListener('click', closeProfilePage);
+function renderProfilePage() {
+  const body = $('profilePageBody');
+  if (!body || !profile) return;
+  body.replaceChildren();
+  const label = profile.full_name || profile.username || 'Utilisateur';
+  const avatar = mk('span', 'avatar p-avatar');
+  setAvatar(avatar, profile.avatar_url, label);
+  const wrap = mk('div', 'pp-avatar');
+  wrap.append(avatar);
+  const change = mk('button', 'pp-change', 'Modifier la photo');
+  change.type = 'button';
+  change.addEventListener('click', () => $('avatarFile')?.click());
+  body.append(wrap, change);
+  const group = mk('div', 'p-group');
+  const row = (name, value, placeholder, field, extra = {}) => {
+    const button = mk('button', 'p-row');
+    button.type = 'button';
+    button.append(mk('span', 'rl', name));
+    const shown = mk('span', 'rv' + (value ? '' : ' accent'), value || placeholder);
+    button.append(shown, mk('span', 'chev', '›'));
+    button.addEventListener('click', () => editProfileField(field, name, extra.raw ?? value, extra));
+    group.append(button);
+  };
+  row('Nom', profile.full_name, 'Ajouter', 'full_name');
+  row('Infos', profile.bio, 'Partagez une idée !', 'bio', { multiline: true });
+  row('Nom de profil', profile.username, 'Ajouter', 'username');
+  row('Numéro de téléphone', profile.phone ? formatPhone(profile.phone) : '', 'Ajouter', 'phone',
+    { raw: profile.phone ? formatPhone(profile.phone) : '+' + currentDial() + ' ' });
+  const firstLink = (myLinks || '').split('\n').filter(Boolean);
+  row('Liens', firstLink.length ? firstLink[0] + (firstLink.length > 1 ? ' (+' + (firstLink.length - 1) + ')' : '') : '',
+    'Ajouter des liens', 'links', { multiline: true, raw: myLinks || '' });
+  body.append(group);
+}
+function editProfileField(field, label, current, opts = {}) {
+  optScope = null;
+  sheetOpen(label, body => {
+    const input = mk(opts.multiline ? 'textarea' : 'input', 'pp-input');
+    if (!opts.multiline) input.type = field === 'phone' ? 'tel' : 'text';
+    if (field === 'links') input.placeholder = 'Un lien par ligne (https://…)';
+    input.value = current || '';
+    input.maxLength = field === 'links' ? 500 : field === 'bio' ? 140 : 60;
+    const save = mk('button', 'pf-go', 'Enregistrer');
+    save.type = 'button';
+    save.addEventListener('click', () => saveProfileField(field, input.value));
+    body.append(input, save);
+    setTimeout(() => input.focus(), 60);
+  });
+}
+async function saveProfileField(field, raw) {
+  const value = raw.trim();
+  const patch = {};
+  if (field === 'full_name') {
+    if (!value) {
+      notify('Le nom ne peut pas être vide.');
+      return;
+    }
+    patch.full_name = value;
+  } else if (field === 'bio') {
+    patch.bio = value;
+  } else if (field === 'username') {
+    const name = value.replace(/^@/, '').toLowerCase();
+    if (!validUsername(name)) {
+      notify('Nom de profil invalide : 3 à 30 caractères (lettres, chiffres, _ et .).');
+      return;
+    }
+    patch.username = name;
+  } else if (field === 'phone') {
+    const phone = normalizePhone(value);
+    if (!validPhone(phone)) {
+      notify('Numéro invalide : ajoutez l’indicatif du pays (ex : +257 …).');
+      return;
+    }
+    patch.phone = phone;
+  } else if (field === 'links') {
+    patch.links = value;
+  }
+  try {
+    const { error } = await db.from('profiles').update(patch).eq('id', me.id);
+    if (error?.code === '23505') {
+      notify(field === 'phone' ? 'Ce numéro est déjà utilisé.' : 'Ce nom de profil est déjà pris.');
+      return;
+    }
+    if (error) {
+      if (field === 'links' && /links|column|schema cache/i.test(error.message || '')) {
+        notify('Exécutez SETUP-v3.sql dans Supabase pour activer les liens.');
+        return;
+      }
+      throw error;
+    }
+    if (field === 'links') myLinks = patch.links;
+    else Object.assign(profile, patch);
+    closeSheet();
+    renderProfile();
+    renderProfilePage();
+    notify('Profil mis à jour.');
+  } catch (error) {
+    errorMessage(error);
+  }
+}
+
+/* =====================================================
+   V3 — STATUTS : éditeur façon WhatsApp
+===================================================== */
+const ST_BG = ['#075e54', '#1f6feb', '#8e24aa', '#d81b60', '#e65100', '#2e7d32', '#37474f', '#000000'];
+const ST_PEN = ['#ffffff', '#000000', '#ff3b30', '#ff9500', '#ffd60a', '#34c759', '#0a84ff', '#bf5af2'];
+const ST_EMOJI = ['😀', '😂', '😍', '🥰', '😎', '🤩', '😢', '😡', '👍', '🙏', '🔥', '🎉',
+  '❤️', '💯', '✨', '🌍', '✈️', '🇺🇸', '🗽', '📍', '⭐', '💼', '📞', '✅'];
+const ST_FONTS = [
+  '-apple-system, system-ui, sans-serif',
+  'Georgia, serif',
+  'ui-monospace, Menlo, monospace',
+  '"Snell Roundhand", "Brush Script MT", cursive'
+];
+const st = {
+  kind: null, file: null, videoUrl: null, base: null, orig: null,
+  items: [], tool: 'none', color: '#ffffff', penW: 10, selected: -1,
+  cur: null, drag: null, bg: ST_BG[0], font: 0, sending: false
+};
+function stAudienceLabel() {
+  const a = prefs.stAudience;
+  if (a.mode === 'except') return 'Statut (' + a.ids.length + ' exclus)';
+  if (a.mode === 'only') return 'Statut (' + a.ids.length + ' choisis)';
+  return 'Statut (Mes contacts)';
+}
+function stUpdateAudience() {
+  document.querySelectorAll('.st-audience').forEach(button => { button.textContent = stAudienceLabel(); });
+}
+async function openAudienceSheet() {
+  optScope = null;
+  let people = [];
+  try {
+    people = await loadKnownPeople();
+  } catch (error) {
+    console.warn(error);
+  }
+  const render = () => sheetOpen('Qui peut voir mon statut ?', body => {
+    const a = prefs.stAudience;
+    [['contacts', 'Mes contacts'], ['except', 'Mes contacts, sauf…'], ['only', 'Partager uniquement avec…']]
+      .forEach(([mode, label]) => body.append(optRow(label, '', () => {
+        a.mode = mode;
+        if (mode === 'contacts') a.ids = [];
+        savePrefs();
+        stUpdateAudience();
+        render();
+      }, { selected: a.mode === mode })));
+    if (a.mode !== 'contacts') {
+      body.append(scopeNote(a.mode === 'except'
+        ? 'Choisissez les personnes qui ne verront PAS votre statut.'
+        : 'Choisissez les seules personnes qui verront votre statut.'));
+      if (!people.length) body.append(scopeNote('Aucun contact pour le moment.'));
+      people.forEach(person => {
+        const row = optRow(person.full_name || person.username || 'Utilisateur', a.ids.includes(person.id) ? '✓' : '', () => {
+          const index = a.ids.indexOf(person.id);
+          if (index >= 0) a.ids.splice(index, 1);
+          else a.ids.push(person.id);
+          row.classList.toggle('sel', index < 0);
+          row.querySelector('.opt-r').textContent = index < 0 ? '✓' : '';
+          savePrefs();
+          stUpdateAudience();
+        }, { selected: a.ids.includes(person.id) });
+        body.append(row);
+      });
+    }
+    const done = mk('button', 'pf-go', 'Terminé');
+    done.type = 'button';
+    done.addEventListener('click', closeSheet);
+    body.append(done);
+  });
+  render();
+}
+document.querySelectorAll('.st-audience').forEach(button => button.addEventListener('click', openAudienceSheet));
+
+function openStatusStart(mode) {
+  if (!me) return;
+  if (mode === 'text') {
+    openTextStatus();
+    return;
+  }
+  if (mode === 'camera') {
+    $('stCameraInput').click();
+    return;
+  }
+  $show('stPicker', true);
+}
+function closeStatusPicker() {
+  $show('stPicker', false);
+}
+$('stPickClose')?.addEventListener('click', closeStatusPicker);
+$('stTileText')?.addEventListener('click', () => { closeStatusPicker(); openTextStatus(); });
+$('stTileGallery')?.addEventListener('click', () => $('stGalleryInput').click());
+$('stTileCamera')?.addEventListener('click', () => $('stCameraInput').click());
+$('stTileCompo')?.addEventListener('click', () => $('stCompoInput').click());
+$('stTileMusic')?.addEventListener('click', () => notify('La musique n’est pas disponible : les droits des morceaux ne le permettent pas.'));
+['stGalleryInput', 'stCameraInput'].forEach(id => $(id)?.addEventListener('change', async () => {
+  const file = $(id).files?.[0];
+  $(id).value = '';
+  if (file) await startEditorWithFile(file);
+}));
+$('stCompoInput')?.addEventListener('change', async () => {
+  const files = [...($('stCompoInput').files || [])].slice(0, 4);
+  $('stCompoInput').value = '';
+  if (files.length < 2) {
+    notify('Choisissez 2 à 4 photos pour la composition.');
+    return;
+  }
+  try {
+    const bitmaps = await Promise.all(files.map(loadBitmap));
+    st.kind = 'image';
+    st.base = composeGrid(bitmaps);
+    stBeginEditor();
+  } catch (error) {
+    errorMessage(error);
+  }
+});
+async function loadBitmap(file) {
+  if (window.createImageBitmap) {
+    try {
+      return await createImageBitmap(file, { imageOrientation: 'from-image' });
+    } catch (error) {
+      /* repli ci-dessous */
+    }
+  }
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Image illisible.')); };
+    img.src = url;
+  });
+}
+function coverDraw(ctx, bitmap, x, y, w, h) {
+  const bw = bitmap.width;
+  const bh = bitmap.height;
+  const scale = Math.max(w / bw, h / bh);
+  const sw = w / scale;
+  const sh = h / scale;
+  ctx.drawImage(bitmap, (bw - sw) / 2, (bh - sh) / 2, sw, sh, x, y, w, h);
+}
+function composeGrid(bitmaps) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1080;
+  canvas.height = 1350;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, 1080, 1350);
+  const gap = 6;
+  const n = bitmaps.length;
+  if (n === 2) {
+    coverDraw(ctx, bitmaps[0], 0, 0, 537, 1350);
+    coverDraw(ctx, bitmaps[1], 543, 0, 537, 1350);
+  } else if (n === 3) {
+    coverDraw(ctx, bitmaps[0], 0, 0, 1080, 672);
+    coverDraw(ctx, bitmaps[1], 0, 672 + gap, 537, 672);
+    coverDraw(ctx, bitmaps[2], 543, 672 + gap, 537, 672);
+  } else {
+    coverDraw(ctx, bitmaps[0], 0, 0, 537, 672);
+    coverDraw(ctx, bitmaps[1], 543, 0, 537, 672);
+    coverDraw(ctx, bitmaps[2], 0, 678, 537, 672);
+    coverDraw(ctx, bitmaps[3], 543, 678, 537, 672);
+  }
+  return canvas;
+}
+async function startEditorWithFile(file) {
+  try {
+    if (file.type.startsWith('video/')) {
+      if (file.size > 25 * 1024 * 1024) {
+        notify('La vidéo dépasse la limite de 25 Mo.');
+        return;
+      }
+      st.kind = 'video';
+      st.file = file;
+      st.base = null;
+      stBeginEditor();
+      return;
+    }
+    if (!file.type.startsWith('image/')) {
+      notify('Les statuts acceptent les photos et les vidéos.');
+      return;
+    }
+    const bitmap = await loadBitmap(file);
+    const max = 1280;
+    const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    st.kind = 'image';
+    st.base = canvas;
+    stBeginEditor();
+  } catch (error) {
+    errorMessage(error);
+  }
+}
+function copyCanvas(source) {
+  const copy = document.createElement('canvas');
+  copy.width = source.width;
+  copy.height = source.height;
+  copy.getContext('2d').drawImage(source, 0, 0);
+  return copy;
+}
+function stBeginEditor() {
+  st.items = [];
+  st.tool = 'none';
+  st.selected = -1;
+  st.cur = null;
+  st.drag = null;
+  st.orig = st.base ? copyCanvas(st.base) : null;
+  $('stCaption').value = '';
+  const stage = $('stStage');
+  stage.replaceChildren();
+  if (st.kind === 'video') {
+    if (st.videoUrl) URL.revokeObjectURL(st.videoUrl);
+    st.videoUrl = URL.createObjectURL(st.file);
+    const video = mk('video');
+    video.id = 'stVideo';
+    video.src = st.videoUrl;
+    video.controls = true;
+    video.playsInline = true;
+    video.muted = true;
+    stage.append(video);
+  } else {
+    const canvas = mk('canvas');
+    canvas.id = 'stCanvas';
+    stage.append(canvas);
+    bindStageCanvas(canvas);
+    stRender();
+  }
+  $('stTools').hidden = st.kind === 'video';
+  stSetTool('none');
+  stUpdateAudience();
+  closeStatusPicker();
+  $show('stEditor', true);
+}
+function stClose(ask = true) {
+  if (ask && st.items.length && !confirm('Abandonner ce statut ?')) return;
+  $show('stEditor', false);
+  if (st.videoUrl) URL.revokeObjectURL(st.videoUrl);
+  st.videoUrl = null;
+  st.file = null;
+  st.base = null;
+  st.orig = null;
+  st.items = [];
+  $('stStage')?.replaceChildren();
+}
+$('stClose')?.addEventListener('click', () => stClose());
+function stDrawItem(ctx, item) {
+  if (item.type === 'stroke') {
+    ctx.strokeStyle = item.color;
+    ctx.lineWidth = item.w;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    item.pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    if (item.pts.length === 1) ctx.lineTo(item.pts[0][0] + 0.1, item.pts[0][1]);
+    ctx.stroke();
+    return;
+  }
+  ctx.font = '700 ' + item.size + 'px ' + ST_FONTS[0];
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = item.color;
+  ctx.shadowColor = 'rgba(0,0,0,.55)';
+  ctx.shadowBlur = item.size / 7;
+  ctx.fillText(item.text, item.x, item.y);
+  ctx.shadowBlur = 0;
+}
+function stRender(target, forExport) {
+  const canvas = target || $('stCanvas');
+  if (!canvas || !st.base) return;
+  canvas.width = st.base.width;
+  canvas.height = st.base.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(st.base, 0, 0);
+  st.items.forEach(item => stDrawItem(ctx, item));
+  const item = st.items[st.selected];
+  if (!forExport && item && item.type !== 'stroke') {
+    ctx.font = '700 ' + item.size + 'px ' + ST_FONTS[0];
+    const w = ctx.measureText(item.text).width + item.size * 0.4;
+    ctx.save();
+    ctx.setLineDash([12, 8]);
+    ctx.strokeStyle = '#5ee9ff';
+    ctx.lineWidth = Math.max(2, canvas.width / 400);
+    ctx.strokeRect(item.x - w / 2, item.y - item.size * 0.7, w, item.size * 1.4);
+    ctx.restore();
+  }
+}
+function stPoint(event, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  return [
+    (event.clientX - rect.left) * canvas.width / rect.width,
+    (event.clientY - rect.top) * canvas.height / rect.height
+  ];
+}
+function stHit(point, canvas) {
+  const ctx = canvas.getContext('2d');
+  for (let i = st.items.length - 1; i >= 0; i -= 1) {
+    const item = st.items[i];
+    if (item.type === 'stroke') continue;
+    ctx.font = '700 ' + item.size + 'px ' + ST_FONTS[0];
+    const w = ctx.measureText(item.text).width / 2 + item.size * 0.3;
+    if (Math.abs(point[0] - item.x) <= w && Math.abs(point[1] - item.y) <= item.size * 0.75) return i;
+  }
+  return -1;
+}
+function bindStageCanvas(canvas) {
+  canvas.style.touchAction = 'none';
+  canvas.addEventListener('pointerdown', event => {
+    canvas.setPointerCapture(event.pointerId);
+    const point = stPoint(event, canvas);
+    if (st.tool === 'draw') {
+      st.cur = { type: 'stroke', color: st.color, w: st.penW * (canvas.width / 1000), pts: [point] };
+      st.items.push(st.cur);
+    } else {
+      const index = stHit(point, canvas);
+      st.selected = index;
+      st.drag = index >= 0 ? [point[0] - st.items[index].x, point[1] - st.items[index].y] : null;
+      stUpdateSelBar();
+    }
+    stRender();
+  });
+  canvas.addEventListener('pointermove', event => {
+    const point = stPoint(event, canvas);
+    if (st.cur) {
+      st.cur.pts.push(point);
+      stRender();
+    } else if (st.drag && st.selected >= 0) {
+      const item = st.items[st.selected];
+      item.x = point[0] - st.drag[0];
+      item.y = point[1] - st.drag[1];
+      stRender();
+    }
+  });
+  const release = () => {
+    st.cur = null;
+    st.drag = null;
+  };
+  canvas.addEventListener('pointerup', release);
+  canvas.addEventListener('pointercancel', release);
+}
+function stSetTool(tool) {
+  st.tool = st.tool === tool ? 'none' : tool;
+  ['stPenBar', 'stEmojiBar', 'stCropBar'].forEach(id => { $(id).hidden = true; });
+  if (st.tool === 'draw') $('stPenBar').hidden = false;
+  if (st.tool === 'sticker') $('stEmojiBar').hidden = false;
+  if (st.tool === 'crop') $('stCropBar').hidden = false;
+  document.querySelectorAll('#stTools button').forEach(button => {
+    button.classList.toggle('on', button.dataset.tool === st.tool);
+  });
+  stUpdateSelBar();
+}
+function stUpdateSelBar() {
+  const item = st.items[st.selected];
+  const textSelected = Boolean(item && item.type !== 'stroke');
+  $('stSelBar').hidden = !textSelected;
+  $('stPenBar').hidden = !(st.tool === 'draw' || textSelected);
+}
+document.querySelectorAll('#stTools button').forEach(button => {
+  button.addEventListener('click', () => {
+    const tool = button.dataset.tool;
+    if (!tool) return;
+    if (tool === 'text') {
+      stAddText();
+      return;
+    }
+    stSetTool(tool);
+  });
+});
+function stAddItem(text, size) {
+  const item = {
+    type: 'text', text, color: st.color, size: Math.round(size * st.base.width / 1000),
+    x: st.base.width / 2, y: st.base.height / 2
+  };
+  st.items.push(item);
+  st.selected = st.items.length - 1;
+  stUpdateSelBar();
+  stRender();
+}
+function stAddText() {
+  optScope = null;
+  sheetOpen('Ajouter du texte', body => {
+    const input = mk('input', 'pp-input');
+    input.type = 'text';
+    input.maxLength = 80;
+    input.placeholder = 'Votre texte';
+    const add = mk('button', 'pf-go', 'Ajouter');
+    add.type = 'button';
+    add.addEventListener('click', () => {
+      const text = input.value.trim();
+      if (!text) return;
+      closeSheet();
+      stAddItem(text, 80);
+    });
+    body.append(input, add);
+    setTimeout(() => input.focus(), 60);
+  });
+}
+$('stPenColors')?.replaceChildren(...ST_PEN.map(color => {
+  const dot = mk('button', 'st-dot');
+  dot.type = 'button';
+  dot.style.background = color;
+  dot.addEventListener('click', () => {
+    st.color = color;
+    const item = st.items[st.selected];
+    if (item && item.type !== 'stroke') {
+      item.color = color;
+      stRender();
+    }
+  });
+  return dot;
+}));
+document.querySelectorAll('#stPenSizes button').forEach(button => {
+  button.addEventListener('click', () => { st.penW = Number(button.dataset.w); });
+});
+$('stEmojiGrid')?.replaceChildren(...ST_EMOJI.map(emoji => {
+  const button = mk('button', 'st-emoji', emoji);
+  button.type = 'button';
+  button.addEventListener('click', () => stAddItem(emoji, 150));
+  return button;
+}));
+$('stUndo')?.addEventListener('click', () => {
+  st.items.pop();
+  st.selected = -1;
+  stUpdateSelBar();
+  stRender();
+});
+$('stSelBigger')?.addEventListener('click', () => {
+  const item = st.items[st.selected];
+  if (item) { item.size = Math.round(item.size * 1.15); stRender(); }
+});
+$('stSelSmaller')?.addEventListener('click', () => {
+  const item = st.items[st.selected];
+  if (item) { item.size = Math.max(10, Math.round(item.size / 1.15)); stRender(); }
+});
+$('stSelDelete')?.addEventListener('click', () => {
+  if (st.selected >= 0) {
+    st.items.splice(st.selected, 1);
+    st.selected = -1;
+    stUpdateSelBar();
+    stRender();
+  }
+});
+function stCropTo(ratio) {
+  const w = st.base.width;
+  const h = st.base.height;
+  let cw = w;
+  let ch = h;
+  if (w / h > ratio) cw = Math.round(h * ratio);
+  else ch = Math.round(w / ratio);
+  const x = Math.round((w - cw) / 2);
+  const y = Math.round((h - ch) / 2);
+  const canvas = document.createElement('canvas');
+  canvas.width = cw;
+  canvas.height = ch;
+  canvas.getContext('2d').drawImage(st.base, x, y, cw, ch, 0, 0, cw, ch);
+  st.items.forEach(item => {
+    if (item.type === 'stroke') item.pts = item.pts.map(([px, py]) => [px - x, py - y]);
+    else { item.x -= x; item.y -= y; }
+  });
+  st.base = canvas;
+  stRender();
+}
+function stRotate() {
+  const w = st.base.width;
+  const h = st.base.height;
+  const canvas = document.createElement('canvas');
+  canvas.width = h;
+  canvas.height = w;
+  const ctx = canvas.getContext('2d');
+  ctx.translate(h, 0);
+  ctx.rotate(Math.PI / 2);
+  ctx.drawImage(st.base, 0, 0);
+  st.items.forEach(item => {
+    if (item.type === 'stroke') item.pts = item.pts.map(([px, py]) => [h - py, px]);
+    else { const nx = h - item.y; item.y = item.x; item.x = nx; }
+  });
+  st.base = canvas;
+  stRender();
+}
+document.querySelectorAll('#stCropBar button').forEach(button => {
+  button.addEventListener('click', () => {
+    if (!st.base) return;
+    const mode = button.dataset.crop;
+    if (mode === 'rotate') stRotate();
+    else if (mode === 'reset') {
+      if (st.items.length && !confirm('Annuler toutes les modifications ?')) return;
+      st.base = copyCanvas(st.orig);
+      st.items = [];
+      st.selected = -1;
+      stRender();
+    } else {
+      const [a, b] = mode.split(':').map(Number);
+      stCropTo(a / b);
+    }
+  });
+});
+async function publishStatus({ type, blob, mime, ext, content, bg }) {
+  if (!me) throw new Error('Non connecté.');
+  if (blob && blob.size > 25 * 1024 * 1024) throw new Error('Le fichier dépasse la limite de 25 Mo.');
+  let mediaPath = null;
+  if (blob) {
+    mediaPath = me.id + '/' + crypto.randomUUID() + '.' + ext;
+    const { error: uploadError } = await db.storage
+      .from('statuses').upload(mediaPath, blob, { contentType: mime, upsert: false });
+    if (uploadError) throw uploadError;
+  }
+  const audience = prefs.stAudience;
+  const base = {
+    user_id: me.id,
+    type,
+    content: content || null,
+    media_path: mediaPath,
+    expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+  };
+  const extra = {
+    ...(bg ? { bg } : {}),
+    audience: audience.mode,
+    audience_ids: audience.mode === 'contacts' ? [] : audience.ids
+  };
+  let { error } = await db.from('statuses').insert({ ...base, ...extra });
+  let degraded = false;
+  if (error && /audience|bg|column|schema cache/i.test(error.message || '')) {
+    if (audience.mode !== 'contacts') {
+      error = new Error('Audience indisponible : exécutez SETUP-v3.sql dans Supabase, puis réessayez.');
+    } else {
+      ({ error } = await db.from('statuses').insert(base));
+      degraded = !error;
+    }
+  }
+  if (error) {
+    if (mediaPath) await db.storage.from('statuses').remove([mediaPath]);
+    throw error;
+  }
+  return degraded;
+}
+async function stSend() {
+  if (st.sending) return;
+  st.sending = true;
+  const button = $('stSend');
+  button.disabled = true;
+  try {
+    const caption = $('stCaption').value.trim();
+    let degraded = false;
+    if (st.kind === 'video') {
+      const ext = (st.file.name.split('.').pop() || 'mp4').toLowerCase();
+      degraded = await publishStatus({ type: 'video', blob: st.file, mime: st.file.type, ext, content: caption });
+    } else {
+      const canvas = document.createElement('canvas');
+      stRender(canvas, true);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.86));
+      if (!blob) throw new Error('Image impossible à préparer.');
+      degraded = await publishStatus({ type: 'image', blob, mime: 'image/jpeg', ext: 'jpg', content: caption });
+    }
+    stClose(false);
+    await loadStatuses();
+    notify(degraded
+      ? 'Statut publié. Exécutez SETUP-v3.sql pour activer l’audience.'
+      : 'Statut publié pour 24 heures.');
+  } catch (error) {
+    errorMessage(error);
+  } finally {
+    st.sending = false;
+    button.disabled = false;
+  }
+}
+$('stSend')?.addEventListener('click', stSend);
+
+/* ---------- Statut texte ---------- */
+function applyTextStatusLook() {
+  $('stText').style.background = st.bg;
+  $('stTextArea').style.fontFamily = ST_FONTS[st.font];
+}
+function openTextStatus() {
+  st.kind = 'text';
+  st.bg = ST_BG[Math.floor(Math.random() * ST_BG.length)];
+  st.font = 0;
+  $('stTextArea').value = '';
+  applyTextStatusLook();
+  stUpdateAudience();
+  $show('stText', true);
+  setTimeout(() => $('stTextArea').focus(), 80);
+}
+function closeTextStatus() {
+  $show('stText', false);
+  $('stTextArea').blur();
+}
+$('stTextClose')?.addEventListener('click', closeTextStatus);
+$('stTextBg')?.addEventListener('click', () => {
+  st.bg = ST_BG[(ST_BG.indexOf(st.bg) + 1) % ST_BG.length];
+  applyTextStatusLook();
+});
+$('stTextFont')?.addEventListener('click', () => {
+  st.font = (st.font + 1) % ST_FONTS.length;
+  applyTextStatusLook();
+});
+$('stTextSend')?.addEventListener('click', async () => {
+  const text = $('stTextArea').value.trim();
+  if (!text) {
+    notify('Écrivez votre statut.');
+    return;
+  }
+  const button = $('stTextSend');
+  button.disabled = true;
+  try {
+    const degraded = await publishStatus({ type: 'text', content: text, bg: st.bg });
+    closeTextStatus();
+    await loadStatuses();
+    notify(degraded
+      ? 'Statut publié. Exécutez SETUP-v3.sql pour activer couleur et audience.'
+      : 'Statut publié pour 24 heures.');
+  } catch (error) {
+    errorMessage(error);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+/* =====================================================
+   V3 — INVITER DES AMIS, INSTALLER L'APPLICATION
+===================================================== */
+let deferredInstall = null;
+window.addEventListener('beforeinstallprompt', event => {
+  event.preventDefault();
+  deferredInstall = event;
+});
+window.addEventListener('appinstalled', () => { deferredInstall = null; });
+const appLink = () => location.origin + location.pathname.replace(/index\.html$/, '');
+async function inviteFriends() {
+  const url = appLink();
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: 'TRUE CHAT', text: 'Rejoins-moi sur TRUE CHAT', url });
+      return;
+    } catch (error) {
+      if (error?.name === 'AbortError') return;
+    }
+  }
+  try {
+    await navigator.clipboard.writeText('Rejoins-moi sur TRUE CHAT : ' + url);
+    notify('Lien copié : ' + url);
+  } catch (error) {
+    prompt('Copiez ce lien :', url);
+  }
+}
+function openInstallSheet() {
+  optScope = null;
+  const standalone = window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone;
+  sheetOpen('Installer l’application', body => {
+    if (standalone) {
+      body.append(scopeNote('✅ L’application est déjà installée sur cet appareil.'));
+    } else if (deferredInstall) {
+      const install = mk('button', 'pf-go', 'Installer maintenant');
+      install.type = 'button';
+      install.addEventListener('click', async () => {
+        deferredInstall.prompt();
+        await deferredInstall.userChoice.catch(() => {});
+        deferredInstall = null;
+        closeSheet();
+      });
+      body.append(install);
+    } else if (/iphone|ipad|ipod/i.test(navigator.userAgent)) {
+      body.append(scopeNote('iPhone : ouvrez ce lien dans Safari, touchez Partager, puis « Sur l’écran d’accueil ».'));
+    } else {
+      body.append(scopeNote('Android : menu ⋮ du navigateur, puis « Installer l’application » (ou « Ajouter à l’écran d’accueil »).'));
+    }
+    body.append(optRow('Envoyer le lien à un ami', '›', inviteFriends));
+    body.append(scopeNote(
+      'Une fois installée, l’app s’ouvre sans le navigateur, garde votre connexion et affiche vos discussions même sans réseau. ' +
+      'Les messages écrits hors ligne partent automatiquement au retour du réseau.'
+    ));
+    body.append(scopeNote(
+      'Pour partager l’app par Xender ou Bluetooth sur Android, il faut un fichier APK : voir le README (PWABuilder).'
+    ));
+  });
+}
+$('setSounds')?.addEventListener('click', openSoundsSheet);
+$('setInvite')?.addEventListener('click', inviteFriends);
+$('setInstall')?.addEventListener('click', openInstallSheet);
+$('ncInvite')?.addEventListener('click', inviteFriends);
+
+/* =====================================================
    RETOUR PAR GLISSEMENT (depuis le bord gauche), UNE ÉTAPE À LA FOIS
    statut ouvert → fermé ; discussion → liste ; page « Vous »/autre onglet → Discussions ;
    feuille ouverte → fermée ; liste verrouillée → liste normale
@@ -3713,9 +5163,14 @@ function backLayer() {
   if (isShown('lockScreen')) return null;
   if (isShown('pinSheet')) return { el: $('pinForm'), back: () => closePin(null) };
   if (isShown('optSheet')) return { el: $('optSheet').querySelector('.sheet-card'), back: closeSheet };
+  if (isShown('stText')) return { el: $('stText'), back: closeTextStatus };
+  if (isShown('stEditor')) return { el: $('stEditor'), back: () => stClose(true) };
+  if (isShown('stPicker')) return { el: $('stPicker'), back: closeStatusPicker };
   if (isShown('statusViewer')) return { el: $('statusViewer'), back: closeStatusViewer };
   if (isShown('statusComposer')) return { el: $('statusComposer').querySelector('.sheet-card'), back: closeStatusComposer };
   if (isShown('newChat')) return { el: $('newChat').querySelector('.nc-card'), back: closeNewChat };
+  if (isShown('profilePage')) return { el: $('profilePage'), back: closeProfilePage };
+  if (isShown('infoPage')) return { el: $('infoPage'), back: closeInfoPage };
   if (isShown('room')) return { el: $('room'), behind: $('home'), back: () => $('back')?.click() };
   if (isShown('home')) {
     if (currentTab === 'chats' && showLockedList) {
@@ -3942,7 +5397,7 @@ async function resizeImage(file, size) {
     return file;
   }
 }
-$('profAvatarBtn')?.addEventListener('click', () => $('avatarFile')?.click());
+$('profAvatarBtn')?.addEventListener('click', openProfilePage);
 $('avatarFile')?.addEventListener('change', async () => {
   const file = $('avatarFile').files?.[0];
   $('avatarFile').value = '';
@@ -4011,25 +5466,14 @@ $('settingsBlocked')?.addEventListener('click', async () => {
    INTERFACE : MENU, FILTRES, RECHERCHE, CAMÉRA
 ===================================================== */
 document.querySelectorAll('.chip[data-filter]').forEach(chip => {
-  chip.addEventListener('click', () => {
-    const filter = chip.dataset.filter;
-    if (filter === 'unread' || filter === 'favorites') {
-      notify('Cette option sera disponible prochainement.');
-      return;
-    }
-    chatFilter = filter;
-    document.querySelectorAll('.chip[data-filter]').forEach(other => {
-      other.classList.toggle('on', other === chip);
-    });
-    renderChatList();
-  });
+  chip.addEventListener('click', () => setChatFilter(chip.dataset.filter));
 });
 $('archivedRow')?.addEventListener('click', () => {
-  notify('Les discussions archivées seront disponibles prochainement.');
+  setChatFilter(chatFilter === 'archived' ? 'all' : 'archived');
 });
 $('cameraBtn')?.addEventListener('click', () => {
   showTab('status');
-  $('statusMedia')?.click();
+  openStatusStart();
 });
 const menuSheet = $('menuSheet');
 $('menuBtn')?.addEventListener('click', event => {
@@ -4095,6 +5539,7 @@ if (!ready) {
   notify('Vérifiez config.js : URL et clé Publishable Supabase.');
 } else {
   const { data } = db.auth.onAuthStateChange((_event, session) => {
+    if (!session && _event !== 'SIGNED_OUT' && !navigator.onLine) return;
     me = session?.user || null;
     if (loginAnimating) return;
     setTimeout(() => {
@@ -4109,8 +5554,9 @@ if (!ready) {
   authListener = data?.subscription;
   db.auth.getSession()
     .then(({ data: sessionData, error }) => {
-      if (error) throw error;
-      me = sessionData?.session?.user || null;
+      if (error && !isNetworkError(error)) throw error;
+      me = sessionData?.session?.user ||
+        ((error || !navigator.onLine) ? storedUser() : null);
       if (me) {
         return initialize();
       }
