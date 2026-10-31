@@ -1,3 +1,4 @@
+
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 const $ = id => document.getElementById(id);
 const cfg = window.TRUE_CHAT_CONFIG;
@@ -15,6 +16,7 @@ let signup = false;
 let room = null;
 let roomChannel = null;
 let authListener = null;
+let bootedFor = null;
 let currentTab = 'chats';
 let selectedMedia = null;
 let lockInitDone = false;
@@ -377,6 +379,7 @@ $('logout')?.addEventListener('click', async () => {
     const { error } = await db.auth.signOut();
     if (error) throw error;
     me = null;
+    bootedFor = null;
     profile = null;
     room = null;
     renderAuth();
@@ -484,6 +487,11 @@ $('profName')?.addEventListener('click', openProfilePage);
 async function initialize() {
   if (!db || !me) return;
   try {
+    const cachedProfile = cacheGet('profile');
+    if (cachedProfile && !profile) {
+      profile = cachedProfile;
+      renderProfile();
+    }
     try {
       await loadProfile();
       cacheSet('profile', profile);
@@ -1486,18 +1494,26 @@ function buildVoicePlayer(message, url) {
    PROFIL D'UN CONTACT / INFOS DU GROUPE (touchez la photo ou le nom)
 ===================================================== */
 let roomOtherId = null;
+function closePhoto() {
+  $('photoView')?.remove();
+}
 function showPhoto(url, label) {
-  const old = $('photoView');
-  if (old) old.remove();
+  closePhoto();
   const view = document.createElement('div');
   view.id = 'photoView';
   const img = document.createElement('img');
   img.src = url;
   img.alt = label || 'Photo de profil';
+  img.draggable = false;
   const caption = document.createElement('p');
   caption.textContent = label || '';
-  view.append(img, caption);
-  view.addEventListener('click', () => view.remove());
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'pv-x';
+  close.setAttribute('aria-label', 'Fermer');
+  close.textContent = '✕';
+  view.append(img, caption, close);
+  view.addEventListener('click', closePhoto);
   document.body.append(view);
 }
 async function openContactProfile(userId) {
@@ -1531,7 +1547,7 @@ async function renameGroup(conversationId, current) {
   }
 }
 async function leaveGroup(conversationId) {
-  if (!confirm('Quitter ce groupe ? Vous ne recevrez plus ses messages.')) return;
+  if (!(await glassConfirm('Vous ne recevrez plus ses messages.', 'Quitter', 'Quitter ce groupe ?'))) return;
   try {
     const { error } = await db.rpc('leave_group', { group_id: conversationId });
     if (error) throw error;
@@ -1579,38 +1595,57 @@ $('sendForm')?.addEventListener('submit', async event => {
     notify('Le fichier dépasse la limite de 25 Mo.');
     return;
   }
-  setBusy(button, true, '…');
-  try {
-    let type = 'text';
-    let extension = 'bin';
-    if (file) {
-      extension = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : 'bin';
-      if (file.type.startsWith('image/')) type = 'image';
-      else if (file.type.startsWith('video/')) type = 'video';
-      else if (file.type.startsWith('audio/')) type = 'voice';
-      else type = 'file';
-    }
-    await sendJob({
-      room,
-      type,
-      content: text,
-      blob: file || null,
-      mime: file?.type,
-      ext: extension,
-      mediaName: file?.name || null
-    });
-    $('messageText').value = '';
-    $('attachment').value = '';
-    $('selectedFile').textContent = '';
-    selectedMedia = null;
-    if ($('cameraInput')) $('cameraInput').value = '';
-    updateComposerMode();
-    await loadMessages();
-  } catch (error) {
-    errorMessage(error);
-  } finally {
-    setBusy(button, false);
+  let type = 'text';
+  let extension = 'bin';
+  if (file) {
+    extension = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : 'bin';
+    if (file.type.startsWith('image/')) type = 'image';
+    else if (file.type.startsWith('video/')) type = 'video';
+    else if (file.type.startsWith('audio/')) type = 'voice';
+    else type = 'file';
   }
+  const job = {
+    room,
+    type,
+    content: text,
+    blob: file || null,
+    mime: file?.type,
+    ext: extension,
+    mediaName: file?.name || null
+  };
+  // Affichage immédiat : le champ se vide et la bulle apparaît tout de suite
+  const temp = pendingBubble(job);
+  const tempNote = temp.querySelector('small');
+  if (tempNote) tempNote.textContent = '⏳ envoi…';
+  $('messageText').value = '';
+  $('attachment').value = '';
+  $('selectedFile').textContent = '';
+  selectedMedia = null;
+  if ($('cameraInput')) $('cameraInput').value = '';
+  updateComposerMode();
+  const box = $('messages');
+  box.append(temp);
+  box.scrollTop = box.scrollHeight;
+  sendJob(job, temp)
+    .then(async status => {
+      if (status !== 'sent') return;
+      temp.remove();
+      if (room !== job.room) return;
+      if (job.sentRow) {
+        await renderMessage(job.sentRow, $('messages'));
+        $('messages').scrollTop = $('messages').scrollHeight;
+      } else {
+        await loadMessages();
+      }
+    })
+    .catch(error => {
+      temp.remove();
+      if (!file && !$('messageText').value) {
+        $('messageText').value = text;
+        updateComposerMode();
+      }
+      errorMessage(error);
+    });
 });
 /* =====================================================
    COMPOSER : MICRO / ENVOI + MESSAGES VOCAUX (MediaRecorder)
@@ -2261,7 +2296,7 @@ $('vDelete')?.addEventListener('click', async event => {
   const item = group?.items[viewer.s];
   if (!item || !group.isMe) return;
   stopViewerTimer();
-  if (!confirm('Supprimer ce statut ?')) {
+  if (!(await glassConfirm('Ce statut sera supprimé.', 'Supprimer', 'Supprimer ce statut ?'))) {
     showViewerStatus();
     return;
   }
@@ -3165,7 +3200,6 @@ function deleteForMe(message, bubble) {
 }
 async function deleteForEveryone(message, bubble) {
   closeSheet();
-  if (!confirm('Supprimer ce message pour tout le monde ?')) return;
   try {
     const run = patch => db.from('messages').update(patch)
       .eq('id', message.id).eq('sender_id', me.id).select('id');
@@ -3220,10 +3254,19 @@ function openMessageActions(message, bubble) {
         }));
       }
     }
-    body.append(optRow('Supprimer pour moi', '🗑', () => deleteForMe(message, bubble)));
-    if (mine) {
-      body.append(optRow('Supprimer pour tout le monde', '🗑', () => deleteForEveryone(message, bubble)));
-    }
+    body.append(optRow('Supprimer', '🗑', async () => {
+      closeSheet();
+      const choice = await glassDialog({
+        title: 'Supprimer le message ?',
+        actions: [
+          { label: 'Supprimer pour moi', value: 'me', danger: true },
+          ...(mine ? [{ label: 'Supprimer pour tout le monde', value: 'all', danger: true }] : []),
+          { label: 'Annuler', value: null }
+        ]
+      });
+      if (choice === 'me') deleteForMe(message, bubble);
+      else if (choice === 'all') deleteForEveryone(message, bubble);
+    }));
   });
 }
 function attachMessageActions(message, bubble) {
@@ -3444,7 +3487,48 @@ function openRoomMenu() {
 $('roomMenu')?.addEventListener('click', openRoomMenu);
 
 /* ---------- Page « Vous » : lignes et valeurs ---------- */
+const LOOKS = [
+  { id: '', name: 'Classique', bg: 'linear-gradient(160deg, #0b1a3d, #050a18)', orb: 'radial-gradient(circle at 30% 30%, #5aa8ff, #1a4fd0)' },
+  { id: 'spheres', name: 'Violet sphères', bg: 'radial-gradient(120% 90% at 30% 0%, #6a1bb0, #1a0236)', orb: 'radial-gradient(circle at 30% 28%, #f6c9ff, #b04cff 50%, #5a12a0)' },
+  { id: 'frost', name: 'Violet verre dépoli', bg: 'linear-gradient(160deg, #2a0b6a, #0b0224)', orb: 'linear-gradient(145deg, #b48cff, #4a1fb8)' }
+];
+const LOOK_KEY = 'truechat.look';
+function currentLook() {
+  try { return localStorage.getItem(LOOK_KEY) || ''; } catch (error) { return ''; }
+}
+function applyLook(id) {
+  if (id) document.documentElement.dataset.look = id;
+  else delete document.documentElement.dataset.look;
+  try {
+    if (id) localStorage.setItem(LOOK_KEY, id);
+    else localStorage.removeItem(LOOK_KEY);
+  } catch (error) { /* ignoré */ }
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', id ? '#12012a' : '#050a18');
+  renderSettingsRows();
+}
+function openLookSheet() {
+  sheetOpen('Style de l’app', body => {
+    body.append(scopeNote('Le style change toute l’application : barres, menus, discussions et connexion.'));
+    const grid = mk('div', 'theme-grid');
+    LOOKS.forEach(look => {
+      const tile = mk('button', 'theme-tile' + (currentLook() === look.id ? ' sel' : ''));
+      tile.type = 'button';
+      tile.style.background = look.bg;
+      const orb = mk('i');
+      orb.style.background = look.orb;
+      orb.style.borderRadius = '50%';
+      tile.append(orb, mk('span', '', look.name));
+      tile.addEventListener('click', () => {
+        applyLook(look.id);
+        openLookSheet();
+      });
+      grid.append(tile);
+    });
+    body.append(grid);
+  });
+}
 function renderSettingsRows() {
+  if ($('rvLook')) $('rvLook').textContent = LOOKS.find(look => look.id === currentLook())?.name || 'Classique';
   if ($('rvImportant')) {
     const count = starredList().length;
     $('rvImportant').textContent = count ? String(count) : 'Aucun';
@@ -3461,6 +3545,7 @@ const settingsRowActions = {
   setMedia: () => openMediaSheet(),
   settingsStorage: () => openStorageSheet(),
   setImportant: () => openImportantSheet(),
+  setLook: () => openLookSheet(),
   setTheme: () => openThemeSheet(),
   setSave: () => openSaveSheet(),
   setEphemeral: () => openEphemeralSheet(),
@@ -3490,6 +3575,43 @@ function mk(tag, cls, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
+let gdClose = null;
+function glassDialog({ title, text, actions }) {
+  return new Promise(resolve => {
+    document.querySelector('.gdlg')?.remove();
+    const overlay = mk('div', 'gdlg');
+    const card = mk('div', 'gdlg-card');
+    if (title) card.append(mk('h3', '', title));
+    if (text) card.append(mk('p', '', text));
+    let done = false;
+    const close = value => {
+      if (done) return;
+      done = true;
+      gdClose = null;
+      overlay.classList.add('out');
+      setTimeout(() => overlay.remove(), 190);
+      resolve(value);
+    };
+    gdClose = close;
+    actions.forEach(action => {
+      const button = mk('button', 'gdlg-btn' + (action.danger ? ' danger' : ''), action.label);
+      button.type = 'button';
+      button.addEventListener('click', () => close(action.value));
+      card.append(button);
+    });
+    overlay.addEventListener('click', event => {
+      if (event.target === overlay) close(null);
+    });
+    overlay.append(card);
+    document.body.append(overlay);
+  });
+}
+const glassConfirm = (text, okLabel = 'Supprimer', title = 'Confirmation') =>
+  glassDialog({
+    title,
+    text,
+    actions: [{ label: okLabel, value: true, danger: true }, { label: 'Annuler', value: false }]
+  }).then(value => value === true);
 const isNetworkError = error =>
   !navigator.onLine ||
   /failed to fetch|networkerror|load failed|network request failed|fetch failed/i
@@ -3574,7 +3696,7 @@ async function deliverJob(job) {
       .upload(mediaPath, job.blob, { contentType: job.mime || 'application/octet-stream', upsert: false });
     if (uploadError) throw uploadError;
   }
-  const { error } = await db.from('messages').insert({
+  const { data, error } = await db.from('messages').insert({
     conversation_id: job.room,
     sender_id: me.id,
     content: job.content || null,
@@ -3583,25 +3705,32 @@ async function deliverJob(job) {
     media_name: job.mediaName || null,
     media_size: job.blob ? job.blob.size : null,
     ...expiryFields(job.room)
-  });
+  }).select('*');
   if (error) {
     if (mediaPath) await db.storage.from('media').remove([mediaPath]);
     throw error;
   }
+  return data?.[0] || null;
 }
 /* Envoie maintenant ; sans réseau, garde le message et l'enverra plus tard. */
-async function sendJob(job) {
+async function sendJob(job, tempBubble) {
   job.id = crypto.randomUUID();
   job.userId = me.id;
   job.createdAt = Date.now();
   job.attempts = 0;
+  if (tempBubble) tempBubble.dataset.pending = job.id;
   try {
-    await deliverJob(job);
+    job.sentRow = await deliverJob(job);
     return 'sent';
   } catch (error) {
     if (!isNetworkError(error)) throw error;
+    delete job.sentRow;
     await outboxAdd(job);
-    if (room === job.room) {
+    if (tempBubble) {
+      const note = tempBubble.querySelector('small');
+      if (note) note.textContent = '⏳ en attente de réseau';
+      $('messages').scrollTop = $('messages').scrollHeight;
+    } else if (room === job.room) {
       $('messages')?.append(pendingBubble(job));
       $('messages').scrollTop = $('messages').scrollHeight;
     }
@@ -3988,8 +4117,8 @@ function openChatMenu(row) {
       body.append(act('Bloquer ' + row.name, '⛔', () => blockUser(row.otherId)));
     }
     body.append(
-      act('Effacer la discussion', '✖', () => {
-        if (!confirm('Effacer tous les messages de cette discussion sur cet appareil ?')) return;
+      act('Effacer la discussion', '✖', async () => {
+        if (!(await glassConfirm('Tous les messages seront effacés sur cet appareil.', 'Effacer', 'Effacer la discussion ?'))) return;
         prefs.clearedAt[row.id] = Date.now();
         if (room === row.id) loadMessages().catch(() => {});
       }),
@@ -3998,7 +4127,7 @@ function openChatMenu(row) {
   });
 }
 async function deleteDiscussion(row) {
-  if (!confirm(row.isGroup ? 'Quitter et supprimer ce groupe ?' : 'Supprimer cette discussion ?')) return;
+  if (!(await glassConfirm(row.isGroup ? 'Vous quitterez ce groupe et il sera supprimé de votre liste.' : 'Cette discussion sera supprimée de votre liste.', 'Supprimer', row.isGroup ? 'Quitter et supprimer ?' : 'Supprimer la discussion ?'))) return;
   if (row.isGroup) {
     const { error } = await db.rpc('leave_group', { group_id: row.id });
     if (error) {
@@ -4012,7 +4141,7 @@ async function deleteDiscussion(row) {
   notify('Discussion supprimée.');
 }
 async function blockUser(userId) {
-  if (!confirm('Bloquer cette personne ?')) return;
+  if (!(await glassConfirm('Elle ne pourra plus vous écrire.', 'Bloquer', 'Bloquer cette personne ?'))) return;
   const { error } = await db.from('blocked_users').insert({ blocker_id: me.id, blocked_id: userId });
   if (error && error.code !== '23505') {
     errorMessage(error);
@@ -4376,6 +4505,7 @@ function renderProfilePage() {
   const label = profile.full_name || profile.username || 'Utilisateur';
   const avatar = mk('span', 'avatar p-avatar');
   setAvatar(avatar, profile.avatar_url, label);
+  if (profile.avatar_url) avatar.addEventListener('click', () => showPhoto(profile.avatar_url, label));
   const wrap = mk('div', 'pp-avatar');
   wrap.append(avatar);
   const change = mk('button', 'pp-change', 'Modifier la photo');
@@ -5161,6 +5291,9 @@ const isShown = id => {
 };
 function backLayer() {
   if (isShown('lockScreen')) return null;
+  const dlg = document.querySelector('.gdlg-card');
+  if (dlg) return { el: dlg, back: () => gdClose?.(null) };
+  if ($('photoView')) return { el: $('photoView'), back: closePhoto };
   if (isShown('pinSheet')) return { el: $('pinForm'), back: () => closePin(null) };
   if (isShown('optSheet')) return { el: $('optSheet').querySelector('.sheet-card'), back: closeSheet };
   if (isShown('stText')) return { el: $('stText'), back: closeTextStatus };
@@ -5540,6 +5673,7 @@ if (!ready) {
 } else {
   const { data } = db.auth.onAuthStateChange((_event, session) => {
     if (!session && _event !== 'SIGNED_OUT' && !navigator.onLine) return;
+    if (_event === 'INITIAL_SESSION' && session?.user && bootedFor === session.user.id) return;
     me = session?.user || null;
     if (loginAnimating) return;
     setTimeout(() => {
@@ -5552,15 +5686,28 @@ if (!ready) {
     }, 0);
   });
   authListener = data?.subscription;
+  // Démarrage rapide : session déjà enregistrée sur l'appareil → on ouvre tout de suite,
+  // sans attendre le réseau (en ligne ou hors-ligne). La connexion n'est demandée qu'une fois.
+  const quickUser = storedUser();
+  if (quickUser) {
+    me = quickUser;
+    bootedFor = quickUser.id;
+    initialize().catch(errorMessage);
+  }
   db.auth.getSession()
     .then(({ data: sessionData, error }) => {
       if (error && !isNetworkError(error)) throw error;
-      me = sessionData?.session?.user ||
-        ((error || !navigator.onLine) ? storedUser() : null);
-      if (me) {
+      const sessionUser = sessionData?.session?.user;
+      if (sessionUser) {
+        me = sessionUser;
+        if (bootedFor === sessionUser.id) return;
+        bootedFor = sessionUser.id;
         return initialize();
       }
+      if (me) return;   // hors-ligne : on garde l'utilisateur enregistré
       renderAuth();
     })
     .catch(errorMessage);
+  // Demande au navigateur de ne pas effacer la session (connexion gardée durablement)
+  navigator.storage?.persist?.().catch(() => {});
 }
