@@ -466,6 +466,10 @@ function setAvatar(el, url, label) {
     el.textContent = initials(label);
   }
 }
+$('profName')?.addEventListener('click', () => copyToClipboard(profile?.full_name || profile?.username, 'Nom copié'));
+$('profUser')?.addEventListener('click', () => copyToClipboard(profile?.phone, 'Numéro copié'));
+$('profName')?.classList.add('copyable');
+$('profUser')?.classList.add('copyable');
 function renderProfile() {
   if (!profile) return;
   const label = profile.full_name || profile.username || 'Utilisateur';
@@ -487,6 +491,13 @@ $('profName')?.addEventListener('click', openProfilePage);
 async function initialize() {
   if (!db || !me) return;
   try {
+    if (!chatRows.length) {
+      const cachedChats = cacheGet('chats');
+      if (cachedChats?.length) {
+        chatRows = cachedChats;
+        renderChatList();
+      }
+    }
     const cachedProfile = cacheGet('profile');
     if (cachedProfile && !profile) {
       profile = cachedProfile;
@@ -1062,6 +1073,13 @@ async function openRoom(id) {
   savePrefs();
   $show('home', false);
   $show('room', true);
+  const early = chatRows.find(row => row.id === id);
+  if (early) {
+    $('roomTitle').textContent = early.name;
+    if ($('roomAvatar')) setAvatar($('roomAvatar'), early.avatarUrl, early.name);
+  }
+  const loadingMessages = loadMessages().catch(errorMessage);
+  subscribeToMessages();
   const { data, error } = await db
     .from('conversations')
     .select(FEATURE.convExpiry ? 'id, title, is_group, ephemeral_seconds' : 'id, title, is_group')
@@ -1094,12 +1112,7 @@ async function openRoom(id) {
   if ($('roomAvatar')) {
     setAvatar($('roomAvatar'), cached?.avatarUrl, roomName);
   }
-  try {
-    await loadMessages();
-    subscribeToMessages();
-  } catch (messageError) {
-    errorMessage(messageError);
-  }
+  await loadingMessages;
 }
 $('back')?.addEventListener('click', async () => {
   cancelVoiceRecording();
@@ -1119,37 +1132,57 @@ $('back')?.addEventListener('click', async () => {
 /* =====================================================
    MESSAGES
 ===================================================== */
-async function loadMessages() {
-  if (!room || !me) return;
-  const box = $('messages');
+function msgSig(list) {
+  return (list || []).map(item => item.id + ':' + (item.deleted_at || '')).join('|');
+}
+async function paintMessages(list, box, myRoom, fast) {
+  const clearedAt = prefs.clearedAt[myRoom] || 0;
+  const shown = (list || []).filter(item => !isExpired(item) && new Date(item.created_at).getTime() > clearedAt);
+  const signing = presignMedia(shown);
+  await (fast ? Promise.race([signing, new Promise(resolve => setTimeout(resolve, 500))]) : signing);
+  if (room !== myRoom) return false;
   box.replaceChildren();
-  const { data, error } = await db
-    .from('messages')
-    .select('*')
-    .eq('conversation_id', room)
-    .order('created_at', { ascending: false })
-    .limit(150);
-  let list = data ? [...data].reverse() : data;
-  if (error) {
-    if (!isNetworkError(error)) throw error;
-    list = cacheGet('msgs.' + room) || [];
-  } else {
-    cacheSet('msgs.' + room, (list || []).slice(-150));
-  }
-  const clearedAt = prefs.clearedAt[room] || 0;
-  for (const message of list || []) {
-    if (isExpired(message)) continue;
-    if (new Date(message.created_at).getTime() <= clearedAt) continue;
+  for (const message of shown) {
     await renderMessage(message, box);
+    if (room !== myRoom) return false;
   }
   await renderPendingForRoom();
   box.scrollTop = box.scrollHeight;
+  return true;
+}
+async function loadMessages() {
+  if (!room || !me) return;
+  const myRoom = room;
+  const box = $('messages');
+  box.replaceChildren();
+  const cached = cacheGet('msgs.' + myRoom);
+  let shownSig = null;
+  if (cached?.length && await paintMessages(cached, box, myRoom, true)) shownSig = msgSig(cached);
+  if (room !== myRoom) return;
+  const { data, error } = await db
+    .from('messages')
+    .select('*')
+    .eq('conversation_id', myRoom)
+    .order('created_at', { ascending: false })
+    .limit(150);
+  if (room !== myRoom) return;
+  let list = data ? [...data].reverse() : data;
+  if (error) {
+    if (!isNetworkError(error)) throw error;
+    if (shownSig !== null) return;
+    list = cached || [];
+  } else {
+    cacheSet('msgs.' + myRoom, (list || []).slice(-150));
+  }
+  if (shownSig !== null && msgSig(list) === shownSig) return;
+  await paintMessages(list, box, myRoom, false);
 }
 async function renderMessage(message, box) {
   if (message.id && box.querySelector('[data-id="' + message.id + '"]')) return;
   if (isExpired(message)) return;
   if (prefs.hidden?.[message.id]) return;
   const bubble = document.createElement('div');
+  let shareUrl = null;
   bubble.className =
     'bubble' + (message.sender_id === me.id ? ' mine' : '');
   if (message.id) bubble.dataset.id = message.id;
@@ -1176,6 +1209,7 @@ async function renderMessage(message, box) {
         const signed = await signUrlOffline(bucket, message.media_path);
         const data = signed ? { signedUrl: signed } : null;
         const error = signed ? null : true;
+        shareUrl = signed || null;
         if (!error && data?.signedUrl) {
           if (message.type === 'image') {
             const img = document.createElement('img');
@@ -1214,6 +1248,7 @@ async function renderMessage(message, box) {
         minute: '2-digit'
       })
     : '';
+  if (!message.deleted_at && (message.content || message.media_path)) addShareButton(time, message, shareUrl);
   bubble.append(time);
 }
 function subscribeToMessages() {
@@ -1496,17 +1531,44 @@ function buildVoicePlayer(message, url) {
    PROFIL D'UN CONTACT / INFOS DU GROUPE (touchez la photo ou le nom)
 ===================================================== */
 let roomOtherId = null;
-function closePhoto() {
-  $('photoView')?.remove();
+let photoSource = null;
+function closePhoto(instant) {
+  const view = $('photoView');
+  if (!view || view.dataset.closing) return;
+  view.dataset.closing = '1';
+  const source = photoSource;
+  photoSource = null;
+  const img = view.querySelector('img');
+  if (instant !== true && source?.isConnected && img?.animate) {
+    const from = source.getBoundingClientRect();
+    const to = img.getBoundingClientRect();
+    if (from.width && to.width) {
+      const dx = from.left + from.width / 2 - (to.left + to.width / 2);
+      const dy = from.top + from.height / 2 - (to.top + to.height / 2);
+      const scale = from.width / to.width;
+      view.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 260, fill: 'forwards' });
+      img.animate(
+        [{ transform: 'none', borderRadius: '22px' }, { transform: 'translate(' + dx + 'px,' + dy + 'px) scale(' + scale + ')', borderRadius: '50%' }],
+        { duration: 260, easing: 'cubic-bezier(.4,0,.2,1)', fill: 'forwards' }
+      ).onfinish = () => view.remove();
+      return;
+    }
+  }
+  view.remove();
 }
-function showPhoto(url, label) {
-  closePhoto();
+function showPhoto(url, label, source) {
+  $('photoView')?.remove();
+  photoSource = source || null;
   const view = document.createElement('div');
   view.id = 'photoView';
   const img = document.createElement('img');
   img.src = url;
   img.alt = label || 'Photo de profil';
   img.draggable = false;
+  if (source) {
+    img.style.animation = 'none';
+    img.style.visibility = 'hidden';
+  }
   const caption = document.createElement('p');
   caption.textContent = label || '';
   const close = document.createElement('button');
@@ -1515,8 +1577,29 @@ function showPhoto(url, label) {
   close.setAttribute('aria-label', 'Fermer');
   close.textContent = '✕';
   view.append(img, caption, close);
-  view.addEventListener('click', closePhoto);
+  view.addEventListener('click', () => closePhoto());
   document.body.append(view);
+  if (source) {
+    const run = () => {
+      img.style.visibility = '';
+      if (!source.isConnected || !img.animate) return;
+      const from = source.getBoundingClientRect();
+      const to = img.getBoundingClientRect();
+      if (!from.width || !to.width) return;
+      const dx = from.left + from.width / 2 - (to.left + to.width / 2);
+      const dy = from.top + from.height / 2 - (to.top + to.height / 2);
+      const scale = from.width / to.width;
+      img.animate(
+        [{ transform: 'translate(' + dx + 'px,' + dy + 'px) scale(' + scale + ')', borderRadius: '50%' }, { transform: 'none', borderRadius: '22px' }],
+        { duration: 400, easing: 'cubic-bezier(.2,.9,.25,1)' }
+      );
+    };
+    if (img.complete && img.naturalWidth) run();
+    else {
+      img.addEventListener('load', run, { once: true });
+      img.addEventListener('error', () => { img.style.visibility = ''; }, { once: true });
+    }
+  }
 }
 async function openContactProfile(userId) {
   if (!userId) return;
@@ -3675,6 +3758,57 @@ function cacheGet(name) {
     return null;
   }
 }
+async function copyToClipboard(text, done = 'Copié') {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (error) {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.cssText = 'position:fixed;opacity:0;';
+    document.body.append(area);
+    area.select();
+    try { document.execCommand('copy'); } catch (e) { /* ignoré */ }
+    area.remove();
+  }
+  notify(done);
+}
+const SHARE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l7 7-7 7"/><path d="M21 11H9a5 5 0 0 0-5 5v3"/></svg>';
+async function shareMessage(message, url) {
+  try {
+    if (!message.media_path) {
+      if (navigator.share) await navigator.share({ text: message.content || '' });
+      else await copyToClipboard(message.content, 'Message copié');
+      return;
+    }
+    if (!url) { notify('Fichier indisponible hors ligne.'); return; }
+    try {
+      const blob = await (await fetch(url)).blob();
+      const ext = (message.media_path.split('.').pop() || 'bin').slice(0, 5);
+      const file = new File([blob], message.media_name || (message.type === 'voice' ? 'vocal.' + ext : 'fichier.' + ext), { type: blob.type });
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({ files: [file], text: message.content || undefined });
+        return;
+      }
+    } catch (error) { /* repli : partage du lien */ }
+    if (navigator.share) await navigator.share({ url, text: message.content || undefined });
+    else await copyToClipboard(url, 'Lien copié');
+  } catch (error) {
+    if (error?.name !== 'AbortError') notify('Partage impossible.');
+  }
+}
+function addShareButton(time, message, url) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'share-btn';
+  button.setAttribute('aria-label', 'Partager');
+  button.innerHTML = SHARE_ICON;
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    shareMessage(message, url);
+  });
+  time.append(button);
+}
 function cachePushMsg(roomId, message) {
   if (!message?.id || !roomId || !me) return;
   const list = cacheGet('msgs.' + roomId) || [];
@@ -3694,17 +3828,47 @@ async function prefetchMessages() {
     } catch (error) { /* hors-ligne : on garde l'ancien cache */ }
   }
 }
-/* URL signée : on garde la dernière pour pouvoir réafficher l'image hors-ligne (le SW la sert depuis son cache) */
+/* URLs signées : mémoire + dernière URL gardée (le SW sert l'image depuis son cache hors-ligne) */
+const signedMem = new Map();
+function signedMemGet(bucket, path) {
+  const entry = signedMem.get(bucket + '/' + path);
+  return entry && entry.exp > Date.now() ? entry.url : null;
+}
+function signedMemSet(bucket, path, url) {
+  const key = bucket + '/' + path;
+  signedMem.set(key, { url, exp: Date.now() + 3300000 });
+  try {
+    let index = JSON.parse(localStorage.getItem('tc.sign.index') || '[]').filter(item => item !== key);
+    index.push(key);
+    while (index.length > 250) localStorage.removeItem('tc.sign.' + index.shift());
+    localStorage.setItem('tc.sign.' + key, url);
+    localStorage.setItem('tc.sign.index', JSON.stringify(index));
+  } catch (error) { /* stockage plein */ }
+}
 async function signUrlOffline(bucket, path) {
-  const key = 'tc.sign.' + bucket + '/' + path;
+  const hit = signedMemGet(bucket, path);
+  if (hit) return hit;
   try {
     const { data, error } = await db.storage.from(bucket).createSignedUrl(path, 3600);
     if (!error && data?.signedUrl) {
-      try { localStorage.setItem(key, data.signedUrl); } catch (e) { /* plein */ }
+      signedMemSet(bucket, path, data.signedUrl);
       return data.signedUrl;
     }
   } catch (error) { /* hors-ligne */ }
-  try { return localStorage.getItem(key); } catch (error) { return null; }
+  try { return localStorage.getItem('tc.sign.' + bucket + '/' + path); } catch (error) { return null; }
+}
+async function presignMedia(list) {
+  if (!db || !navigator.onLine) return;
+  const need = (list || []).filter(item => item.media_path && !item.deleted_at &&
+    ['image', 'video', 'voice', 'file'].includes(item.type) && !signedMemGet('media', item.media_path))
+    .map(item => item.media_path);
+  if (!need.length) return;
+  try {
+    const { data, error } = await db.storage.from('media').createSignedUrls(need, 3600);
+    if (!error) (data || []).forEach(entry => {
+      if (entry.path && entry.signedUrl) signedMemSet('media', entry.path, entry.signedUrl);
+    });
+  } catch (error) { /* ignoré */ }
 }
 function storedUser() {
   try {
@@ -4322,13 +4486,28 @@ async function openInfoPage(opts, push = true) {
     else infoStack.length = 0;
   }
   infoCurrent = opts;
+  $('infoBody').replaceChildren();   // plus de contenu de la personne précédente
+  $show('infoPage', true);
   try {
     await renderInfoPage();
   } catch (error) {
     errorMessage(error);
-    return;
+    if (infoCurrent === opts) $show('infoPage', false);
   }
-  $show('infoPage', true);
+}
+async function fetchPersonInfo(opts) {
+  const { data, error } = await db.from('profiles').select(profileCols()).eq('id', opts.userId).maybeSingle();
+  if (error) throw error;
+  if (!data) {
+    notify('Profil introuvable.');
+    throw new Error('Profil introuvable.');
+  }
+  const convId = opts.convId || chatRows.find(row => !row.isGroup && row.otherId === data.id)?.id || null;
+  const check = await db.from('blocked_users').select('blocked_id')
+    .eq('blocker_id', me.id).eq('blocked_id', data.id).maybeSingle();
+  const result = { person: data, blocked: Boolean(check.data), convId };
+  cacheSet('person.' + opts.userId, result);
+  return result;
 }
 function closeInfoPage() {
   if (infoStack.length) {
@@ -4364,27 +4543,26 @@ async function renderInfoPage() {
       members = cacheGet('group.' + convId) || [];
     }
   } else {
-    try {
-      const { data, error } = await db.from('profiles').select(profileCols()).eq('id', opts.userId).maybeSingle();
-      if (error) throw error;
-      person = data;
-      if (!person) {
-        notify('Profil introuvable.');
-        throw new Error('Profil introuvable.');
-      }
-      convId = convId || chatRows.find(row => !row.isGroup && row.otherId === person.id)?.id || null;
-      opts.convId = convId;
-      const check = await db.from('blocked_users').select('blocked_id')
-        .eq('blocker_id', me.id).eq('blocked_id', person.id).maybeSingle();
-      blocked = Boolean(check.data);
-      cacheSet('person.' + opts.userId, { person, blocked, convId });
-    } catch (error) {
-      if (!isNetworkError(error)) throw error;
-      const saved = cacheGet('person.' + opts.userId);
-      if (!saved?.person) throw error;
+    const saved = cacheGet('person.' + opts.userId);
+    if (saved?.person) {
+      // affichage immédiat depuis le cache, mise à jour en arrière-plan
       person = saved.person;
       blocked = saved.blocked;
       convId = convId || saved.convId || chatRows.find(row => !row.isGroup && row.otherId === person.id)?.id || null;
+      opts.convId = convId;
+      if (!opts.refreshing) {
+        opts.refreshing = true;
+        fetchPersonInfo(opts).then(fresh => {
+          opts.refreshing = false;
+          const changed = JSON.stringify([fresh.person, fresh.blocked]) !== JSON.stringify([saved.person, saved.blocked]);
+          if (changed && infoCurrent === opts && !$('infoPage').hidden) renderInfoPage().catch(() => {});
+        }).catch(() => { opts.refreshing = false; });
+      }
+    } else {
+      const fresh = await fetchPersonInfo(opts);
+      person = fresh.person;
+      blocked = fresh.blocked;
+      convId = fresh.convId;
       opts.convId = convId;
     }
   }
@@ -4395,15 +4573,19 @@ async function renderInfoPage() {
   const avatar = mk('span', 'avatar p-avatar');
   setAvatar(avatar, isGroup ? chatRows.find(row => row.id === convId)?.avatarUrl : person.avatar_url, title);
   const avatarUrl = isGroup ? null : person.avatar_url;
-  if (avatarUrl) avatar.addEventListener('click', () => showPhoto(avatarUrl, title));
+  if (avatarUrl) avatar.addEventListener('click', () => showPhoto(avatarUrl, title, avatar));
   const wrap = mk('div', 'pp-avatar');
   wrap.append(avatar);
-  body.append(wrap, mk('h2', 'p-name', title));
+  const nameEl = mk('h2', 'p-name copyable', title);
+  nameEl.addEventListener('click', () => copyToClipboard(title, 'Nom copié'));
+  body.append(wrap, nameEl);
   if (isGroup) {
     body.append(mk('p', 'p-user', 'Groupe · ' + members.length + ' participant' + (members.length > 1 ? 's' : '')));
   } else {
-    body.append(mk('p', 'p-user', [person.phone ? formatPhone(person.phone) : '', person.username ? '@' + person.username : '']
-      .filter(Boolean).join(' · ')));
+    const userLine = mk('p', 'p-user' + (person.phone ? ' copyable' : ''), [person.phone ? formatPhone(person.phone) : '', person.username ? '@' + person.username : '']
+      .filter(Boolean).join(' · '));
+    if (person.phone) userLine.addEventListener('click', () => copyToClipboard(person.phone, 'Numéro copié'));
+    body.append(userLine);
     if (person.bio) body.append(mk('p', 'pf-bio', person.bio));
   }
 
@@ -4584,7 +4766,7 @@ function renderProfilePage() {
   const label = profile.full_name || profile.username || 'Utilisateur';
   const avatar = mk('span', 'avatar p-avatar');
   setAvatar(avatar, profile.avatar_url, label);
-  if (profile.avatar_url) avatar.addEventListener('click', () => showPhoto(profile.avatar_url, label));
+  if (profile.avatar_url) avatar.addEventListener('click', () => showPhoto(profile.avatar_url, label, avatar));
   const wrap = mk('div', 'pp-avatar');
   wrap.append(avatar);
   const change = mk('button', 'pp-change', 'Modifier la photo');
@@ -5372,7 +5554,7 @@ function backLayer() {
   if (isShown('lockScreen')) return null;
   const dlg = document.querySelector('.gdlg-card');
   if (dlg) return { el: dlg, back: () => gdClose?.(null) };
-  if ($('photoView')) return { el: $('photoView'), back: closePhoto };
+  if ($('photoView')) return { el: $('photoView'), back: () => closePhoto(true) };
   if (isShown('pinSheet')) return { el: $('pinForm'), back: () => closePin(null) };
   if (isShown('optSheet')) return { el: $('optSheet').querySelector('.sheet-card'), back: closeSheet };
   if (isShown('stText')) return { el: $('stText'), back: closeTextStatus };
