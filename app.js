@@ -765,6 +765,7 @@ async function loadChats() {
   savePrefs();
   cacheSet('chats', chatRows);
   renderChatList();
+  prefetchMessages();
 }
 $('refresh')?.addEventListener('click', async () => {
   try {
@@ -1126,14 +1127,14 @@ async function loadMessages() {
     .from('messages')
     .select('*')
     .eq('conversation_id', room)
-    .order('created_at', { ascending: true })
+    .order('created_at', { ascending: false })
     .limit(150);
-  let list = data;
+  let list = data ? [...data].reverse() : data;
   if (error) {
     if (!isNetworkError(error)) throw error;
     list = cacheGet('msgs.' + room) || [];
   } else {
-    cacheSet('msgs.' + room, (data || []).slice(-80));
+    cacheSet('msgs.' + room, (list || []).slice(-150));
   }
   const clearedAt = prefs.clearedAt[room] || 0;
   for (const message of list || []) {
@@ -1172,9 +1173,9 @@ async function renderMessage(message, box) {
           ? 'media'
           : null;
       if (bucket) {
-        const { data, error } = await db.storage
-          .from(bucket)
-          .createSignedUrl(message.media_path, 3600);
+        const signed = await signUrlOffline(bucket, message.media_path);
+        const data = signed ? { signedUrl: signed } : null;
+        const error = signed ? null : true;
         if (!error && data?.signedUrl) {
           if (message.type === 'image') {
             const img = document.createElement('img');
@@ -1234,6 +1235,7 @@ function subscribeToMessages() {
       },
       async payload => {
         if (room !== subscribedRoom) return;
+        cachePushMsg(subscribedRoom, payload.new);
         const box = $('messages');
         if (box && payload.new) {
           await renderMessage(payload.new, box);
@@ -1632,6 +1634,7 @@ $('sendForm')?.addEventListener('submit', async event => {
       temp.remove();
       if (room !== job.room) return;
       if (job.sentRow) {
+        cachePushMsg(job.room, job.sentRow);
         await renderMessage(job.sentRow, $('messages'));
         $('messages').scrollTop = $('messages').scrollHeight;
       } else {
@@ -1946,12 +1949,10 @@ async function statusUrl(path) {
   if (!path || !db) return null;
   const cached = signedCache.get(path);
   if (cached && cached.exp > Date.now()) return cached.url;
-  const { data, error } = await db.storage
-    .from('statuses')
-    .createSignedUrl(path, 3600);
-  if (error || !data?.signedUrl) return null;
-  signedCache.set(path, { url: data.signedUrl, exp: Date.now() + 3300000 });
-  return data.signedUrl;
+  const url = await signUrlOffline('statuses', path);
+  if (!url) return null;
+  signedCache.set(path, { url, exp: Date.now() + 3300000 });
+  return url;
 }
 let statusGroups = [];
 let statusOrder = [];
@@ -1970,23 +1971,35 @@ function statusTimeLabel(value) {
 async function loadStatuses() {
   if (!me || !db) return;
   if (!$('statusStrip')) return;
-  const { data, error } = await db
-    .from('statuses')
-    .select('*')
-    .gt('expires_at', new Date().toISOString())
-    .order('created_at', { ascending: true })
-    .limit(300);
-  if (error) throw error;
-  const ids = [...new Set((data || []).map(item => item.user_id))];
+  let data;
   const names = new Map();
-  if (ids.length) {
-    const { data: people } = await db
-      .from('profiles')
-      .select('id, full_name, username')
-      .in('id', ids);
-    (people || []).forEach(person => {
-      names.set(person.id, person.full_name || person.username || 'Utilisateur');
-    });
+  try {
+    const result = await db
+      .from('statuses')
+      .select('*')
+      .gt('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: true })
+      .limit(300);
+    if (result.error) throw result.error;
+    data = result.data;
+    const ids = [...new Set((data || []).map(item => item.user_id))];
+    if (ids.length) {
+      const { data: people } = await db
+        .from('profiles')
+        .select('id, full_name, username')
+        .in('id', ids);
+      (people || []).forEach(person => {
+        names.set(person.id, person.full_name || person.username || 'Utilisateur');
+      });
+    }
+    cacheSet('statuses', { data, names: [...names.entries()] });
+  } catch (error) {
+    if (!isNetworkError(error)) throw error;
+    const saved = cacheGet('statuses');
+    if (!saved) return;
+    const now = Date.now();
+    data = (saved.data || []).filter(item => !item.expires_at || new Date(item.expires_at).getTime() > now);
+    (saved.names || []).forEach(([id, name]) => names.set(id, name));
   }
   const byUser = new Map();
   (data || []).forEach(item => {
@@ -2407,34 +2420,51 @@ document.querySelectorAll('nav [data-tab]').forEach(button => {
 /* =====================================================
    CONTACTS
 ===================================================== */
+function renderContactsList(items) {
+  const box = $('contactsList');
+  if (!box) return;
+  box.replaceChildren();
+  if (!items?.length) {
+    box.textContent = 'Aucun contact enregistré.';
+    return;
+  }
+  for (const item of items) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'item';
+    button.textContent = item.name;
+    button.onclick = () => startPrivateChat(item.id);
+    box.append(button);
+  }
+}
 async function loadContacts() {
   if (!me) return;
   const box = $('contactsList');
   if (!box) return;
-  const { data, error } = await db
-    .from('contacts')
-    .select('contact_id, nickname')
-    .eq('owner_id', me.id);
-  if (error) throw error;
-  box.replaceChildren();
-  if (!data?.length) {
-    box.textContent = 'Aucun contact enregistré.';
-    return;
-  }
-  for (const contact of data) {
-    const { data: user, error: userError } = await db
-      .from('profiles')
-      .select('id, username, full_name')
-      .eq('id', contact.contact_id)
-      .maybeSingle();
-    if (userError || !user) continue;
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'item';
-    button.textContent =
-      contact.nickname || user.full_name || user.username;
-    button.onclick = () => startPrivateChat(user.id);
-    box.append(button);
+  const cached = cacheGet('contacts');
+  if (cached) renderContactsList(cached);   // affichage immédiat
+  try {
+    const { data, error } = await db
+      .from('contacts')
+      .select('contact_id, nickname')
+      .eq('owner_id', me.id);
+    if (error) throw error;
+    const items = [];
+    for (const contact of data || []) {
+      const { data: user, error: userError } = await db
+        .from('profiles')
+        .select('id, username, full_name')
+        .eq('id', contact.contact_id)
+        .maybeSingle();
+      if (userError) throw userError;
+      if (!user) continue;
+      items.push({ id: user.id, name: contact.nickname || user.full_name || user.username });
+    }
+    cacheSet('contacts', items);
+    renderContactsList(items);
+  } catch (error) {
+    if (!isNetworkError(error)) throw error;
+    if (!cached) renderContactsList([]);
   }
 }
 /* =====================================================
@@ -3645,6 +3675,37 @@ function cacheGet(name) {
     return null;
   }
 }
+function cachePushMsg(roomId, message) {
+  if (!message?.id || !roomId || !me) return;
+  const list = cacheGet('msgs.' + roomId) || [];
+  if (list.some(item => item.id === message.id)) return;
+  list.push(message);
+  cacheSet('msgs.' + roomId, list.slice(-150));
+}
+let prefetchAt = 0;
+async function prefetchMessages() {
+  if (!db || !me || !navigator.onLine || Date.now() - prefetchAt < 120000) return;
+  prefetchAt = Date.now();
+  for (const row of chatRows.slice(0, 20)) {
+    try {
+      const { data, error } = await db.from('messages').select('*')
+        .eq('conversation_id', row.id).order('created_at', { ascending: false }).limit(100);
+      if (!error && data) cacheSet('msgs.' + row.id, [...data].reverse());
+    } catch (error) { /* hors-ligne : on garde l'ancien cache */ }
+  }
+}
+/* URL signée : on garde la dernière pour pouvoir réafficher l'image hors-ligne (le SW la sert depuis son cache) */
+async function signUrlOffline(bucket, path) {
+  const key = 'tc.sign.' + bucket + '/' + path;
+  try {
+    const { data, error } = await db.storage.from(bucket).createSignedUrl(path, 3600);
+    if (!error && data?.signedUrl) {
+      try { localStorage.setItem(key, data.signedUrl); } catch (e) { /* plein */ }
+      return data.signedUrl;
+    }
+  } catch (error) { /* hors-ligne */ }
+  try { return localStorage.getItem(key); } catch (error) { return null; }
+}
 function storedUser() {
   try {
     for (let i = 0; i < localStorage.length; i += 1) {
@@ -3904,6 +3965,7 @@ function showBanner(title, text, roomId) {
   showBanner.timer = setTimeout(() => { banner.hidden = true; }, 4500);
 }
 function onIncoming(message) {
+  if (message && me) cachePushMsg(message.conversation_id, message);
   if (!message || !me || message.sender_id === me.id || isExpired(message)) return;
   clearTimeout(inboxTimer);
   inboxTimer = setTimeout(() => loadChats().catch(() => {}), 600);
@@ -4287,27 +4349,44 @@ async function renderInfoPage() {
   let members = [];
   let blocked = false;
   if (isGroup) {
-    const { data: rows, error } = await db.from('conversation_members').select('user_id').eq('conversation_id', convId);
-    if (error) throw error;
-    const ids = (rows || []).map(item => item.user_id);
-    if (ids.length) {
-      const result = await db.from('profiles').select(profileCols()).in('id', ids);
-      if (result.error) throw result.error;
-      members = result.data || [];
+    try {
+      const { data: rows, error } = await db.from('conversation_members').select('user_id').eq('conversation_id', convId);
+      if (error) throw error;
+      const ids = (rows || []).map(item => item.user_id);
+      if (ids.length) {
+        const result = await db.from('profiles').select(profileCols()).in('id', ids);
+        if (result.error) throw result.error;
+        members = result.data || [];
+      }
+      cacheSet('group.' + convId, members);
+    } catch (error) {
+      if (!isNetworkError(error)) throw error;
+      members = cacheGet('group.' + convId) || [];
     }
   } else {
-    const { data, error } = await db.from('profiles').select(profileCols()).eq('id', opts.userId).maybeSingle();
-    if (error) throw error;
-    person = data;
-    if (!person) {
-      notify('Profil introuvable.');
-      throw new Error('Profil introuvable.');
+    try {
+      const { data, error } = await db.from('profiles').select(profileCols()).eq('id', opts.userId).maybeSingle();
+      if (error) throw error;
+      person = data;
+      if (!person) {
+        notify('Profil introuvable.');
+        throw new Error('Profil introuvable.');
+      }
+      convId = convId || chatRows.find(row => !row.isGroup && row.otherId === person.id)?.id || null;
+      opts.convId = convId;
+      const check = await db.from('blocked_users').select('blocked_id')
+        .eq('blocker_id', me.id).eq('blocked_id', person.id).maybeSingle();
+      blocked = Boolean(check.data);
+      cacheSet('person.' + opts.userId, { person, blocked, convId });
+    } catch (error) {
+      if (!isNetworkError(error)) throw error;
+      const saved = cacheGet('person.' + opts.userId);
+      if (!saved?.person) throw error;
+      person = saved.person;
+      blocked = saved.blocked;
+      convId = convId || saved.convId || chatRows.find(row => !row.isGroup && row.otherId === person.id)?.id || null;
+      opts.convId = convId;
     }
-    convId = convId || chatRows.find(row => !row.isGroup && row.otherId === person.id)?.id || null;
-    opts.convId = convId;
-    const check = await db.from('blocked_users').select('blocked_id')
-      .eq('blocker_id', me.id).eq('blocked_id', person.id).maybeSingle();
-    blocked = Boolean(check.data);
   }
   const title = isGroup ? (opts.title || 'Groupe') : (person.full_name || person.username || 'Utilisateur');
   $('infoTitle').textContent = isGroup ? 'Infos du groupe' : 'Informations';
