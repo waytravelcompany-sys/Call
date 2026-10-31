@@ -3758,7 +3758,7 @@ async function renderPendingForRoom() {
 }
 function updateNetBanner() {
   const banner = $('netBanner');
-  if (banner) banner.hidden = navigator.onLine;
+  if (banner) banner.hidden = true;   // bandeau « Hors ligne » désactivé
 }
 let flushing = false;
 async function flushOutbox() {
