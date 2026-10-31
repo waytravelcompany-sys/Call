@@ -10,6 +10,7 @@
   <meta name="apple-mobile-web-app-title" content="TRUE CHAT">
   <title>TRUE CHAT</title>
   <link rel="manifest" href="manifest.webmanifest">
+  <script>try{var l=localStorage.getItem('truechat.look');if(l)document.documentElement.dataset.look=l;}catch(e){}</script>
   <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <style>
@@ -997,9 +998,37 @@ body.blurred #room, body.blurred #home { filter: blur(26px); }
 .pf-bio { color: rgba(255, 255, 255, .78); font-size: 14.5px; line-height: 1.45; max-width: 320px; overflow-wrap: anywhere; }
 .pf-go { width: 100%; margin-top: 14px; padding: 14px; border-radius: 16px; background: var(--grad); color: #fff; font-weight: 800; font-size: 15px; box-shadow: 0 8px 22px rgba(60, 100, 255, .4); }
 .pf-members .opt-row .avatar { width: 40px; height: 40px; min-width: 40px; min-height: 40px; font-size: 15px; }
-#photoView { position: fixed; inset: 0; z-index: 700; display: grid; place-items: center; background: rgba(2, 6, 18, .88); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); cursor: zoom-out; }
-#photoView img { max-width: 94vw; max-height: 84vh; border-radius: 20px; box-shadow: 0 20px 70px rgba(0, 0, 0, .6); }
+#photoView { position: fixed; inset: 0; z-index: 700; display: grid; place-items: center; background: rgba(2, 6, 18, .88); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); cursor: zoom-out; animation: pvIn .26s ease both; }
+#photoView img { max-width: 94vw; max-height: 84vh; border-radius: 22px; box-shadow: 0 20px 70px rgba(0, 0, 0, .6); animation: pvImg .38s cubic-bezier(.2, .95, .25, 1.05) both; }
 #photoView p { position: absolute; left: 0; right: 0; bottom: calc(24px + env(safe-area-inset-bottom)); text-align: center; color: #fff; font-weight: 700; }
+#photoView .pv-x { position: absolute; top: calc(14px + env(safe-area-inset-top)); right: 14px; width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-size: 17px; background: rgba(255, 255, 255, .14); border: 1px solid rgba(255, 255, 255, .26); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .3); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
+@keyframes pvIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pvImg { from { opacity: 0; transform: scale(.84); } to { opacity: 1; transform: none; } }
+
+/* ---------- boîte de dialogue au centre (verre / miroir + animation) ---------- */
+.gdlg { position: fixed; inset: 0; z-index: 800; display: grid; place-items: center; padding: 24px; background: rgba(2, 6, 18, .5); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); animation: gdFade .22s ease both; }
+.gdlg.out { animation: gdFadeOut .18s ease both; }
+.gdlg.out .gdlg-card { animation: gdPopOut .18s ease both; }
+.gdlg-card { position: relative; overflow: hidden; width: min(340px, 100%); padding: 22px 16px 12px; border-radius: 30px; text-align: center; color: #fff;
+  background: linear-gradient(155deg, rgba(255, 255, 255, .26), rgba(255, 255, 255, .07) 42%, rgba(255, 255, 255, .13)), rgba(14, 22, 52, .5);
+  border: 1px solid rgba(255, 255, 255, .3);
+  -webkit-backdrop-filter: blur(34px) saturate(185%); backdrop-filter: blur(34px) saturate(185%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), inset 0 -1px 0 rgba(255, 255, 255, .08), 0 26px 70px rgba(0, 0, 0, .55);
+  animation: gdPop .42s cubic-bezier(.2, 1.15, .3, 1) both; }
+.gdlg-card::before { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(115deg, transparent 30%, rgba(255, 255, 255, .2) 46%, transparent 62%); transform: translateX(-110%); animation: gdShine 1.2s .18s ease-out forwards; }
+.gdlg-card h3 { margin: 0 0 6px; font-size: 19px; font-weight: 800; }
+.gdlg-card p { margin: 0 0 14px; color: rgba(255, 255, 255, .74); font-size: 14.5px; line-height: 1.4; }
+.gdlg-btn { position: relative; display: block; width: 100%; margin: 8px 0 0; padding: 14px; border-radius: 17px; border: 1px solid rgba(255, 255, 255, .22); background: rgba(255, 255, 255, .12); color: #fff; font: inherit; font-weight: 700; font-size: 16px; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .3); transition: transform .12s, background .12s; animation: gdBtn .4s ease both; }
+.gdlg-btn:nth-of-type(2) { animation-delay: .05s; }
+.gdlg-btn:nth-of-type(3) { animation-delay: .1s; }
+.gdlg-btn:active { transform: scale(.96); background: rgba(255, 255, 255, .22); }
+.gdlg-btn.danger { color: #ff7585; background: rgba(255, 80, 100, .15); border-color: rgba(255, 115, 130, .38); }
+@keyframes gdFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes gdFadeOut { from { opacity: 1; } to { opacity: 0; } }
+@keyframes gdPop { from { opacity: 0; transform: scale(.8) translateY(16px); } to { opacity: 1; transform: none; } }
+@keyframes gdPopOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: scale(.92); } }
+@keyframes gdShine { to { transform: translateX(110%); } }
+@keyframes gdBtn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 
 /* ---------- fond animé : boules personnalisables ---------- */
 #bg .b1 { background: var(--o1, linear-gradient(145deg, #00d9ff 0%, #1a6bff 55%, #0b2fe0 100%)); width: calc(84vmin * var(--bgsize, 1)); height: calc(84vmin * var(--bgsize, 1)); animation-duration: calc(15s * var(--bgslow, 1)); }
@@ -1078,6 +1107,51 @@ textarea.pp-input { min-height: 96px; resize: vertical; }
 .st-tiles button b { font-size: 30px; }
 .st-hint { color: var(--gray) !important; font-size: 14px; padding: 0 20px; text-align: center; }
 .st-textmode textarea { flex: 1; width: 100%; background: transparent; border: 0; outline: 0; color: #fff; text-align: center; font-size: 30px; padding: 20px; resize: none; }
+
+/* =====================================================
+   STYLES DE L'APP (launcher) : Violet sphères / Violet verre dépoli
+   choisis dans Vous > Style de l'app ; html[data-look]
+===================================================== */
+html[data-look="spheres"], html[data-look="frost"] {
+  --green: #d9a8ff; --grad: linear-gradient(135deg, #c084fc, #7c3aed);
+  --glass: rgba(255, 255, 255, .1); --glass-line: rgba(255, 255, 255, .3); --bubble-in: rgba(255, 255, 255, .14);
+  --field: rgba(255, 255, 255, .1); --line: rgba(255, 255, 255, .14);
+}
+html[data-look="spheres"], html[data-look="spheres"] body { background: radial-gradient(120% 90% at 30% 0%, #62128f 0%, #2a0750 48%, #0f0120 100%) fixed; }
+html[data-look="frost"], html[data-look="frost"] body { background: linear-gradient(160deg, #1d0649 0%, #0b0224 55%, #14043d 100%) fixed; }
+html[data-look="spheres"] #bg {
+  --o1: radial-gradient(circle at 32% 28%, #f6c9ff 0%, #c15cff 38%, #6a1bb8 78%, #3a0a6e 100%);
+  --o2: radial-gradient(circle at 32% 28%, #ffd9ff, #e07bff 42%, #8a2be2 100%);
+  --o3: radial-gradient(circle at 32% 28%, #ecbcff, #a43df0 45%, #4b0f92 100%);
+  --o4: radial-gradient(circle at 32% 28%, #f3ccff, #b25cf0 50%, #5a1aa0 100%);
+}
+html[data-look="frost"] #bg {
+  --o1: linear-gradient(145deg, #a37bff, #4a1fb8 62%, #26086e);
+  --o2: linear-gradient(145deg, #c9a6ff, #7a45e6);
+  --o3: linear-gradient(145deg, #8a5cff, #3a14a0);
+  --o4: linear-gradient(145deg, #b78cff, #5a2cd0);
+  overflow: hidden;
+}
+html[data-look="frost"] #bg::before, html[data-look="frost"] #bg::after {
+  content: ""; position: absolute; width: 150vmax; height: 30vmax; border-radius: 30vmax; filter: blur(5px); pointer-events: none;
+  background: linear-gradient(90deg, rgba(160, 110, 255, 0), rgba(176, 130, 255, .6), rgba(110, 60, 230, .25));
+}
+html[data-look="frost"] #bg::before { left: -40vmax; top: 62%; transform: rotate(-32deg); }
+html[data-look="frost"] #bg::after { right: -60vmax; top: 6%; transform: rotate(-32deg); opacity: .7; }
+/* verre liquide partout (barres, cartes, menus, champs, connexion) */
+html[data-look="spheres"] :is(.nav-bg, .search, .p-group, .p-bar, .room-bar, .composer, .menu-sheet, .sheet-card, .nc-card, .auth-card, .pin-card, .opt-row, .gdlg-card),
+html[data-look="frost"] :is(.nav-bg, .search, .p-group, .p-bar, .room-bar, .composer, .menu-sheet, .sheet-card, .nc-card, .auth-card, .pin-card, .opt-row, .gdlg-card) {
+  background: linear-gradient(150deg, rgba(255, 255, 255, .26), rgba(255, 255, 255, .06) 42%, rgba(255, 255, 255, .13)), rgba(52, 16, 100, .34);
+  border-color: rgba(255, 255, 255, .3);
+  -webkit-backdrop-filter: blur(30px) saturate(190%); backdrop-filter: blur(30px) saturate(190%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .5), inset 0 -1px 0 rgba(255, 255, 255, .1), inset 0 0 24px rgba(255, 255, 255, .05), 0 14px 40px rgba(20, 0, 50, .35);
+}
+html[data-look] .bubble:not(.mine) { background: linear-gradient(150deg, rgba(255, 255, 255, .22), rgba(255, 255, 255, .08)); border: 1px solid rgba(255, 255, 255, .22); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35); }
+html[data-look="spheres"] .auth-card { border-radius: 46px; }
+html[data-look="frost"] .auth-card { border-radius: 32px; background-image: linear-gradient(150deg, rgba(255, 255, 255, .22), rgba(255, 255, 255, .04) 45%, rgba(255, 255, 255, .1)), repeating-radial-gradient(circle at 30% 20%, rgba(255, 255, 255, .035) 0 2px, transparent 2px 7px); }
+html[data-look="spheres"] #auth .field input { border-radius: 999px; background: rgba(255, 255, 255, .14); border: 1px solid rgba(255, 255, 255, .3); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35); }
+html[data-look="frost"] #auth .field input { border-radius: 16px; background: rgba(10, 2, 40, .5); border: 1.5px solid rgba(255, 255, 255, .85); }
+html[data-look] .btn-liquid { background: linear-gradient(180deg, #dcb8ff, #9a54f0); border: 1px solid rgba(255, 255, 255, .7); color: #fff; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .6), 0 10px 28px rgba(140, 60, 240, .45); }
 </style>
 </head>
 <body>
@@ -1254,6 +1328,13 @@ textarea.pp-input { min-height: 96px; resize: vertical; }
         <button type="button" class="p-row" id="setImportant">
           <svg class="ri" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 2.700 5.600 6.100.9-4.400 4.300 1 6.100L12 17l-5.400 2.900 1-6.100L3.200 9.500l6.100-.9L12 3Z"/></svg>
           <span class="rl">Important</span><span class="rv" id="rvImportant">Aucun</span><span class="chev">›</span>
+        </button>
+      </div>
+
+      <div class="p-group glow">
+        <button type="button" class="p-row" id="setLook">
+          <svg class="ri" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2.500" width="14" height="19" rx="3"/><circle cx="12" cy="9" r="3"/><path d="M9 17h6"/></svg>
+          <span class="rl">Style de l’app</span><span class="rv" id="rvLook">Classique</span><span class="chev">›</span>
         </button>
       </div>
 
@@ -1642,6 +1723,7 @@ let signup = false;
 let room = null;
 let roomChannel = null;
 let authListener = null;
+let bootedFor = null;
 let currentTab = 'chats';
 let selectedMedia = null;
 let lockInitDone = false;
@@ -2004,6 +2086,7 @@ $('logout')?.addEventListener('click', async () => {
     const { error } = await db.auth.signOut();
     if (error) throw error;
     me = null;
+    bootedFor = null;
     profile = null;
     room = null;
     renderAuth();
@@ -2111,6 +2194,11 @@ $('profName')?.addEventListener('click', openProfilePage);
 async function initialize() {
   if (!db || !me) return;
   try {
+    const cachedProfile = cacheGet('profile');
+    if (cachedProfile && !profile) {
+      profile = cachedProfile;
+      renderProfile();
+    }
     try {
       await loadProfile();
       cacheSet('profile', profile);
@@ -3113,18 +3201,26 @@ function buildVoicePlayer(message, url) {
    PROFIL D'UN CONTACT / INFOS DU GROUPE (touchez la photo ou le nom)
 ===================================================== */
 let roomOtherId = null;
+function closePhoto() {
+  $('photoView')?.remove();
+}
 function showPhoto(url, label) {
-  const old = $('photoView');
-  if (old) old.remove();
+  closePhoto();
   const view = document.createElement('div');
   view.id = 'photoView';
   const img = document.createElement('img');
   img.src = url;
   img.alt = label || 'Photo de profil';
+  img.draggable = false;
   const caption = document.createElement('p');
   caption.textContent = label || '';
-  view.append(img, caption);
-  view.addEventListener('click', () => view.remove());
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'pv-x';
+  close.setAttribute('aria-label', 'Fermer');
+  close.textContent = '✕';
+  view.append(img, caption, close);
+  view.addEventListener('click', closePhoto);
   document.body.append(view);
 }
 async function openContactProfile(userId) {
@@ -3158,7 +3254,7 @@ async function renameGroup(conversationId, current) {
   }
 }
 async function leaveGroup(conversationId) {
-  if (!confirm('Quitter ce groupe ? Vous ne recevrez plus ses messages.')) return;
+  if (!(await glassConfirm('Vous ne recevrez plus ses messages.', 'Quitter', 'Quitter ce groupe ?'))) return;
   try {
     const { error } = await db.rpc('leave_group', { group_id: conversationId });
     if (error) throw error;
@@ -3206,38 +3302,57 @@ $('sendForm')?.addEventListener('submit', async event => {
     notify('Le fichier dépasse la limite de 25 Mo.');
     return;
   }
-  setBusy(button, true, '…');
-  try {
-    let type = 'text';
-    let extension = 'bin';
-    if (file) {
-      extension = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : 'bin';
-      if (file.type.startsWith('image/')) type = 'image';
-      else if (file.type.startsWith('video/')) type = 'video';
-      else if (file.type.startsWith('audio/')) type = 'voice';
-      else type = 'file';
-    }
-    await sendJob({
-      room,
-      type,
-      content: text,
-      blob: file || null,
-      mime: file?.type,
-      ext: extension,
-      mediaName: file?.name || null
-    });
-    $('messageText').value = '';
-    $('attachment').value = '';
-    $('selectedFile').textContent = '';
-    selectedMedia = null;
-    if ($('cameraInput')) $('cameraInput').value = '';
-    updateComposerMode();
-    await loadMessages();
-  } catch (error) {
-    errorMessage(error);
-  } finally {
-    setBusy(button, false);
+  let type = 'text';
+  let extension = 'bin';
+  if (file) {
+    extension = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : 'bin';
+    if (file.type.startsWith('image/')) type = 'image';
+    else if (file.type.startsWith('video/')) type = 'video';
+    else if (file.type.startsWith('audio/')) type = 'voice';
+    else type = 'file';
   }
+  const job = {
+    room,
+    type,
+    content: text,
+    blob: file || null,
+    mime: file?.type,
+    ext: extension,
+    mediaName: file?.name || null
+  };
+  // Affichage immédiat : le champ se vide et la bulle apparaît tout de suite
+  const temp = pendingBubble(job);
+  const tempNote = temp.querySelector('small');
+  if (tempNote) tempNote.textContent = '⏳ envoi…';
+  $('messageText').value = '';
+  $('attachment').value = '';
+  $('selectedFile').textContent = '';
+  selectedMedia = null;
+  if ($('cameraInput')) $('cameraInput').value = '';
+  updateComposerMode();
+  const box = $('messages');
+  box.append(temp);
+  box.scrollTop = box.scrollHeight;
+  sendJob(job, temp)
+    .then(async status => {
+      if (status !== 'sent') return;
+      temp.remove();
+      if (room !== job.room) return;
+      if (job.sentRow) {
+        await renderMessage(job.sentRow, $('messages'));
+        $('messages').scrollTop = $('messages').scrollHeight;
+      } else {
+        await loadMessages();
+      }
+    })
+    .catch(error => {
+      temp.remove();
+      if (!file && !$('messageText').value) {
+        $('messageText').value = text;
+        updateComposerMode();
+      }
+      errorMessage(error);
+    });
 });
 /* =====================================================
    COMPOSER : MICRO / ENVOI + MESSAGES VOCAUX (MediaRecorder)
@@ -3888,7 +4003,7 @@ $('vDelete')?.addEventListener('click', async event => {
   const item = group?.items[viewer.s];
   if (!item || !group.isMe) return;
   stopViewerTimer();
-  if (!confirm('Supprimer ce statut ?')) {
+  if (!(await glassConfirm('Ce statut sera supprimé.', 'Supprimer', 'Supprimer ce statut ?'))) {
     showViewerStatus();
     return;
   }
@@ -4792,7 +4907,6 @@ function deleteForMe(message, bubble) {
 }
 async function deleteForEveryone(message, bubble) {
   closeSheet();
-  if (!confirm('Supprimer ce message pour tout le monde ?')) return;
   try {
     const run = patch => db.from('messages').update(patch)
       .eq('id', message.id).eq('sender_id', me.id).select('id');
@@ -4847,10 +4961,19 @@ function openMessageActions(message, bubble) {
         }));
       }
     }
-    body.append(optRow('Supprimer pour moi', '🗑', () => deleteForMe(message, bubble)));
-    if (mine) {
-      body.append(optRow('Supprimer pour tout le monde', '🗑', () => deleteForEveryone(message, bubble)));
-    }
+    body.append(optRow('Supprimer', '🗑', async () => {
+      closeSheet();
+      const choice = await glassDialog({
+        title: 'Supprimer le message ?',
+        actions: [
+          { label: 'Supprimer pour moi', value: 'me', danger: true },
+          ...(mine ? [{ label: 'Supprimer pour tout le monde', value: 'all', danger: true }] : []),
+          { label: 'Annuler', value: null }
+        ]
+      });
+      if (choice === 'me') deleteForMe(message, bubble);
+      else if (choice === 'all') deleteForEveryone(message, bubble);
+    }));
   });
 }
 function attachMessageActions(message, bubble) {
@@ -5071,7 +5194,48 @@ function openRoomMenu() {
 $('roomMenu')?.addEventListener('click', openRoomMenu);
 
 /* ---------- Page « Vous » : lignes et valeurs ---------- */
+const LOOKS = [
+  { id: '', name: 'Classique', bg: 'linear-gradient(160deg, #0b1a3d, #050a18)', orb: 'radial-gradient(circle at 30% 30%, #5aa8ff, #1a4fd0)' },
+  { id: 'spheres', name: 'Violet sphères', bg: 'radial-gradient(120% 90% at 30% 0%, #6a1bb0, #1a0236)', orb: 'radial-gradient(circle at 30% 28%, #f6c9ff, #b04cff 50%, #5a12a0)' },
+  { id: 'frost', name: 'Violet verre dépoli', bg: 'linear-gradient(160deg, #2a0b6a, #0b0224)', orb: 'linear-gradient(145deg, #b48cff, #4a1fb8)' }
+];
+const LOOK_KEY = 'truechat.look';
+function currentLook() {
+  try { return localStorage.getItem(LOOK_KEY) || ''; } catch (error) { return ''; }
+}
+function applyLook(id) {
+  if (id) document.documentElement.dataset.look = id;
+  else delete document.documentElement.dataset.look;
+  try {
+    if (id) localStorage.setItem(LOOK_KEY, id);
+    else localStorage.removeItem(LOOK_KEY);
+  } catch (error) { /* ignoré */ }
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', id ? '#12012a' : '#050a18');
+  renderSettingsRows();
+}
+function openLookSheet() {
+  sheetOpen('Style de l’app', body => {
+    body.append(scopeNote('Le style change toute l’application : barres, menus, discussions et connexion.'));
+    const grid = mk('div', 'theme-grid');
+    LOOKS.forEach(look => {
+      const tile = mk('button', 'theme-tile' + (currentLook() === look.id ? ' sel' : ''));
+      tile.type = 'button';
+      tile.style.background = look.bg;
+      const orb = mk('i');
+      orb.style.background = look.orb;
+      orb.style.borderRadius = '50%';
+      tile.append(orb, mk('span', '', look.name));
+      tile.addEventListener('click', () => {
+        applyLook(look.id);
+        openLookSheet();
+      });
+      grid.append(tile);
+    });
+    body.append(grid);
+  });
+}
 function renderSettingsRows() {
+  if ($('rvLook')) $('rvLook').textContent = LOOKS.find(look => look.id === currentLook())?.name || 'Classique';
   if ($('rvImportant')) {
     const count = starredList().length;
     $('rvImportant').textContent = count ? String(count) : 'Aucun';
@@ -5088,6 +5252,7 @@ const settingsRowActions = {
   setMedia: () => openMediaSheet(),
   settingsStorage: () => openStorageSheet(),
   setImportant: () => openImportantSheet(),
+  setLook: () => openLookSheet(),
   setTheme: () => openThemeSheet(),
   setSave: () => openSaveSheet(),
   setEphemeral: () => openEphemeralSheet(),
@@ -5117,6 +5282,43 @@ function mk(tag, cls, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
+let gdClose = null;
+function glassDialog({ title, text, actions }) {
+  return new Promise(resolve => {
+    document.querySelector('.gdlg')?.remove();
+    const overlay = mk('div', 'gdlg');
+    const card = mk('div', 'gdlg-card');
+    if (title) card.append(mk('h3', '', title));
+    if (text) card.append(mk('p', '', text));
+    let done = false;
+    const close = value => {
+      if (done) return;
+      done = true;
+      gdClose = null;
+      overlay.classList.add('out');
+      setTimeout(() => overlay.remove(), 190);
+      resolve(value);
+    };
+    gdClose = close;
+    actions.forEach(action => {
+      const button = mk('button', 'gdlg-btn' + (action.danger ? ' danger' : ''), action.label);
+      button.type = 'button';
+      button.addEventListener('click', () => close(action.value));
+      card.append(button);
+    });
+    overlay.addEventListener('click', event => {
+      if (event.target === overlay) close(null);
+    });
+    overlay.append(card);
+    document.body.append(overlay);
+  });
+}
+const glassConfirm = (text, okLabel = 'Supprimer', title = 'Confirmation') =>
+  glassDialog({
+    title,
+    text,
+    actions: [{ label: okLabel, value: true, danger: true }, { label: 'Annuler', value: false }]
+  }).then(value => value === true);
 const isNetworkError = error =>
   !navigator.onLine ||
   /failed to fetch|networkerror|load failed|network request failed|fetch failed/i
@@ -5201,7 +5403,7 @@ async function deliverJob(job) {
       .upload(mediaPath, job.blob, { contentType: job.mime || 'application/octet-stream', upsert: false });
     if (uploadError) throw uploadError;
   }
-  const { error } = await db.from('messages').insert({
+  const { data, error } = await db.from('messages').insert({
     conversation_id: job.room,
     sender_id: me.id,
     content: job.content || null,
@@ -5210,25 +5412,32 @@ async function deliverJob(job) {
     media_name: job.mediaName || null,
     media_size: job.blob ? job.blob.size : null,
     ...expiryFields(job.room)
-  });
+  }).select('*');
   if (error) {
     if (mediaPath) await db.storage.from('media').remove([mediaPath]);
     throw error;
   }
+  return data?.[0] || null;
 }
 /* Envoie maintenant ; sans réseau, garde le message et l'enverra plus tard. */
-async function sendJob(job) {
+async function sendJob(job, tempBubble) {
   job.id = crypto.randomUUID();
   job.userId = me.id;
   job.createdAt = Date.now();
   job.attempts = 0;
+  if (tempBubble) tempBubble.dataset.pending = job.id;
   try {
-    await deliverJob(job);
+    job.sentRow = await deliverJob(job);
     return 'sent';
   } catch (error) {
     if (!isNetworkError(error)) throw error;
+    delete job.sentRow;
     await outboxAdd(job);
-    if (room === job.room) {
+    if (tempBubble) {
+      const note = tempBubble.querySelector('small');
+      if (note) note.textContent = '⏳ en attente de réseau';
+      $('messages').scrollTop = $('messages').scrollHeight;
+    } else if (room === job.room) {
       $('messages')?.append(pendingBubble(job));
       $('messages').scrollTop = $('messages').scrollHeight;
     }
@@ -5615,8 +5824,8 @@ function openChatMenu(row) {
       body.append(act('Bloquer ' + row.name, '⛔', () => blockUser(row.otherId)));
     }
     body.append(
-      act('Effacer la discussion', '✖', () => {
-        if (!confirm('Effacer tous les messages de cette discussion sur cet appareil ?')) return;
+      act('Effacer la discussion', '✖', async () => {
+        if (!(await glassConfirm('Tous les messages seront effacés sur cet appareil.', 'Effacer', 'Effacer la discussion ?'))) return;
         prefs.clearedAt[row.id] = Date.now();
         if (room === row.id) loadMessages().catch(() => {});
       }),
@@ -5625,7 +5834,7 @@ function openChatMenu(row) {
   });
 }
 async function deleteDiscussion(row) {
-  if (!confirm(row.isGroup ? 'Quitter et supprimer ce groupe ?' : 'Supprimer cette discussion ?')) return;
+  if (!(await glassConfirm(row.isGroup ? 'Vous quitterez ce groupe et il sera supprimé de votre liste.' : 'Cette discussion sera supprimée de votre liste.', 'Supprimer', row.isGroup ? 'Quitter et supprimer ?' : 'Supprimer la discussion ?'))) return;
   if (row.isGroup) {
     const { error } = await db.rpc('leave_group', { group_id: row.id });
     if (error) {
@@ -5639,7 +5848,7 @@ async function deleteDiscussion(row) {
   notify('Discussion supprimée.');
 }
 async function blockUser(userId) {
-  if (!confirm('Bloquer cette personne ?')) return;
+  if (!(await glassConfirm('Elle ne pourra plus vous écrire.', 'Bloquer', 'Bloquer cette personne ?'))) return;
   const { error } = await db.from('blocked_users').insert({ blocker_id: me.id, blocked_id: userId });
   if (error && error.code !== '23505') {
     errorMessage(error);
@@ -6003,6 +6212,7 @@ function renderProfilePage() {
   const label = profile.full_name || profile.username || 'Utilisateur';
   const avatar = mk('span', 'avatar p-avatar');
   setAvatar(avatar, profile.avatar_url, label);
+  if (profile.avatar_url) avatar.addEventListener('click', () => showPhoto(profile.avatar_url, label));
   const wrap = mk('div', 'pp-avatar');
   wrap.append(avatar);
   const change = mk('button', 'pp-change', 'Modifier la photo');
@@ -6788,6 +6998,9 @@ const isShown = id => {
 };
 function backLayer() {
   if (isShown('lockScreen')) return null;
+  const dlg = document.querySelector('.gdlg-card');
+  if (dlg) return { el: dlg, back: () => gdClose?.(null) };
+  if ($('photoView')) return { el: $('photoView'), back: closePhoto };
   if (isShown('pinSheet')) return { el: $('pinForm'), back: () => closePin(null) };
   if (isShown('optSheet')) return { el: $('optSheet').querySelector('.sheet-card'), back: closeSheet };
   if (isShown('stText')) return { el: $('stText'), back: closeTextStatus };
@@ -7167,6 +7380,7 @@ if (!ready) {
 } else {
   const { data } = db.auth.onAuthStateChange((_event, session) => {
     if (!session && _event !== 'SIGNED_OUT' && !navigator.onLine) return;
+    if (_event === 'INITIAL_SESSION' && session?.user && bootedFor === session.user.id) return;
     me = session?.user || null;
     if (loginAnimating) return;
     setTimeout(() => {
@@ -7179,17 +7393,30 @@ if (!ready) {
     }, 0);
   });
   authListener = data?.subscription;
+  // Démarrage rapide : session déjà enregistrée sur l'appareil → on ouvre tout de suite,
+  // sans attendre le réseau (en ligne ou hors-ligne). La connexion n'est demandée qu'une fois.
+  const quickUser = storedUser();
+  if (quickUser) {
+    me = quickUser;
+    bootedFor = quickUser.id;
+    initialize().catch(errorMessage);
+  }
   db.auth.getSession()
     .then(({ data: sessionData, error }) => {
       if (error && !isNetworkError(error)) throw error;
-      me = sessionData?.session?.user ||
-        ((error || !navigator.onLine) ? storedUser() : null);
-      if (me) {
+      const sessionUser = sessionData?.session?.user;
+      if (sessionUser) {
+        me = sessionUser;
+        if (bootedFor === sessionUser.id) return;
+        bootedFor = sessionUser.id;
         return initialize();
       }
+      if (me) return;   // hors-ligne : on garde l'utilisateur enregistré
       renderAuth();
     })
     .catch(errorMessage);
+  // Demande au navigateur de ne pas effacer la session (connexion gardée durablement)
+  navigator.storage?.persist?.().catch(() => {});
 }
 </script>
 </body>
