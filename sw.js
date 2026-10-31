@@ -1,6 +1,7 @@
 /* TRUE CHAT — service worker : installation PWA, mode hors-ligne et notifications push */
-const CACHE = 'truechat-shell-v3';
+const CACHE = 'truechat-shell-v5';
 const CDN_CACHE = 'truechat-cdn-v1';
+const IMG_CACHE = 'truechat-img-v1';
 const SHELL = [
   './',
   './index.html',
@@ -50,7 +51,7 @@ self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
       .then(keys => Promise.all(
-        keys.filter(key => key !== CACHE && key !== CDN_CACHE).map(key => caches.delete(key))
+        keys.filter(key => key !== CACHE && key !== CDN_CACHE && key !== IMG_CACHE).map(key => caches.delete(key))
       ))
       .then(() => self.clients.claim())
   );
@@ -74,20 +75,51 @@ self.addEventListener('fetch', event => {
     );
     return;
   }
+  // Images Supabase (photos de profil, images des messages et statuts) : gardées pour le hors-ligne.
+  // Clé = chemin sans le jeton (les URLs signées changent à chaque fois).
+  if (url.hostname.endsWith('.supabase.co') && url.pathname.startsWith('/storage/v1/object/') &&
+      request.destination === 'image' && !request.headers.has('range')) {
+    const key = url.origin + url.pathname;
+    const isPublic = url.pathname.startsWith('/storage/v1/object/public/');
+    event.respondWith(caches.open(IMG_CACHE).then(async cache => {
+      const hit = await cache.match(key);
+      const network = () => fetch(request).then(response => {
+        if (response.ok || response.type === 'opaque') {
+          cache.put(key, response.clone());
+          cache.keys().then(keys => {
+            if (keys.length > 400) keys.slice(0, keys.length - 400).forEach(k => cache.delete(k));
+          });
+        }
+        return response;
+      });
+      if (hit) {
+        if (isPublic) event.waitUntil(network().catch(() => null));   // photo de profil : mise à jour en arrière-plan
+        return hit;
+      }
+      return network();
+    }));
+    return;
+  }
   // Supabase (données privées), autres sites : jamais en cache
   if (url.origin !== self.location.origin) return;
 
   if (request.mode === 'navigate') {
-    // Page : réseau d'abord, copie en cache si hors-ligne
-    event.respondWith(
-      fetch(request)
+    // Page : ouverture instantanée depuis le cache, mise à jour en arrière-plan
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE);
+      const hit = await cache.match('./index.html');
+      const refresh = fetch(request)
         .then(response => {
-          const copy = response.clone();
-          caches.open(CACHE).then(cache => cache.put('./index.html', copy));
+          if (response.ok) cache.put('./index.html', response.clone());
           return response;
         })
-        .catch(() => caches.match('./index.html').then(hit => hit || caches.match('./')))
-    );
+        .catch(() => null);
+      if (hit) {
+        event.waitUntil(refresh);
+        return hit;
+      }
+      return (await refresh) || (await caches.match('./')) || Response.error();
+    })());
     return;
   }
 
