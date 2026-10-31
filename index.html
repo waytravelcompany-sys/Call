@@ -1064,7 +1064,7 @@ input, textarea, select { font-size: max(16px, 1em) !important; }
 .chat-row.unread .txt { color: #fff; }
 .unread-dot { position: absolute; right: calc(var(--u) * 28); bottom: calc(var(--u) * 26); width: 12px; height: 12px; border-radius: 50%; background: var(--green); }
 .bubble.pending { opacity: .75; }
-.net-banner { position: fixed; left: 0; right: 0; top: 0; z-index: 400; padding: calc(6px + env(safe-area-inset-top)) 12px 6px; text-align: center; font-size: 13px; background: #b45309; color: #fff; }
+.net-banner { display: none !important; position: fixed; left: 0; right: 0; top: 0; z-index: 400; padding: calc(6px + env(safe-area-inset-top)) 12px 6px; text-align: center; font-size: 13px; background: #b45309; color: #fff; }
 .in-banner { position: fixed; left: 12px; right: 12px; top: calc(10px + env(safe-area-inset-top)); z-index: 390; display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: 16px; background: rgba(30, 40, 70, .96); color: #fff; box-shadow: 0 10px 30px rgba(0, 0, 0, .5); }
 .in-banner span { color: #cfd6e6; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .opt-sub { margin: 14px 2px 0; color: #5ee9ff; font-size: 13px; text-transform: uppercase; letter-spacing: .5px; }
@@ -1703,6 +1703,23 @@ window.TRUE_CHAT_CONFIG = {
   vapidPublicKey: "" // clé publique VAPID pour les notifications push (voir SETUP.md)
 };
 console.log("TRUE CHAT connected to Supabase");
+</script>
+<!-- Ouverture directe : si une session existe, on affiche tout de suite les discussions (pas d'écran de connexion) -->
+<script>
+try {
+  var hasSession = false;
+  for (var i = 0; i < localStorage.length; i++) {
+    var k = localStorage.key(i);
+    if (/^sb-.*-auth-token$/.test(k)) {
+      var v = JSON.parse(localStorage.getItem(k) || 'null');
+      if (v && v.user && v.user.id) { hasSession = true; break; }
+    }
+  }
+  if (hasSession) {
+    document.getElementById('auth').hidden = true;
+    document.getElementById('home').hidden = false;
+  }
+} catch (e) {}
 </script>
 <!-- APPLICATION TRUE CHAT -->
 <script type="module">
@@ -5465,7 +5482,7 @@ async function renderPendingForRoom() {
 }
 function updateNetBanner() {
   const banner = $('netBanner');
-  if (banner) banner.hidden = navigator.onLine;
+  if (banner) banner.hidden = true;   // bandeau « Hors ligne » désactivé
 }
 let flushing = false;
 async function flushOutbox() {
