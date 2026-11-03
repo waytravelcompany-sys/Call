@@ -1216,10 +1216,15 @@ async function renderMessage(message, box) {
             img.src = data.signedUrl;
             img.alt = message.media_name || 'Image';
             img.loading = 'lazy';
+            bubble.classList.add('media-bubble');
+            if (!message.content) bubble.classList.add('no-caption');
+            img.addEventListener('click', () => showPhoto(data.signedUrl, message.content || '', img));
             bubble.append(img);
             addSaveButton(bubble, data.signedUrl, message.media_name, 'image');
           } else if (message.type === 'video') {
             const video = document.createElement('video');
+            bubble.classList.add('media-bubble');
+            if (!message.content) bubble.classList.add('no-caption');
             video.src = data.signedUrl;
             video.controls = true;
             video.playsInline = true;
@@ -3965,6 +3970,16 @@ async function sendJob(job, tempBubble) {
 function pendingBubble(job) {
   const bubble = mk('div', 'bubble mine pending');
   bubble.dataset.pending = job.id;
+  if (job.type === 'image' && job.blob) {
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(job.blob);
+    img.addEventListener('load', () => setTimeout(() => URL.revokeObjectURL(img.src), 30000), { once: true });
+    bubble.classList.add('media-bubble');
+    if (!job.content) bubble.classList.add('no-caption');
+    if (job.content) bubble.append(mk('div', '', job.content));
+    bubble.append(img, mk('small', '', '⏳ envoi…'));
+    return bubble;
+  }
   const label = job.content ||
     ({ image: '📷 Photo', video: '🎥 Vidéo', voice: '🎤 Message vocal', file: '📄 ' + (job.mediaName || 'Fichier') }[job.type] || 'Message');
   bubble.append(mk('div', '', label), mk('small', '', '⏳ en attente de réseau'));
@@ -5629,7 +5644,40 @@ function endSwipe(event) {
     }, 240);
   }
 }
+const IS_ANDROID = /android/i.test(navigator.userAgent);
+/* Android : le geste/bouton « Retour » du système ferme d'abord la couche du dessus (photo, menu, page, discussion…),
+   étape par étape ; à la racine, il faut appuyer deux fois pour quitter. */
+(function setupSystemBack() {
+  let armed = false;
+  let lastRootBack = 0;
+  const guard = () => history.pushState({ tcGuard: true }, '');
+  const arm = () => {
+    if (armed) return;
+    armed = true;
+    history.replaceState({ tcBase: true }, '');
+    guard();
+  };
+  // l'entrée d'historique n'est ajoutée qu'après un premier toucher (sinon Android l'ignorerait)
+  document.addEventListener('pointerdown', arm, { once: true, passive: true });
+  window.addEventListener('popstate', () => {
+    if (!armed) return;
+    const layer = backLayer();
+    if (layer) {
+      layer.back();
+      guard();
+      return;
+    }
+    if (Date.now() - lastRootBack < 1800) {
+      history.back();
+      return;
+    }
+    lastRootBack = Date.now();
+    notify('Appuyez encore pour quitter');
+    guard();
+  });
+})();
 document.addEventListener('touchstart', event => {
+  if (IS_ANDROID) return;   // sur Android, le geste système gère le retour
   if (event.touches.length !== 1) return;
   const touch = event.touches[0];
   if (touch.clientX > SWIPE_EDGE) return;
