@@ -1,4 +1,3 @@
-
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 const $ = id => document.getElementById(id);
 const cfg = window.TRUE_CHAT_CONFIG;
@@ -1856,20 +1855,29 @@ async function startVoiceRecording() {
     return;
   }
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-    notify("Iki gikoresho ntikibasha gufata amajwi.");
+    notify("Ce téléphone ne peut pas enregistrer de vocaux. iPhone : iOS 14.3 minimum, ouvrez l’app depuis Safari ou l’écran d’accueil.");
     return;
   }
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
   } catch (error) {
     console.error('Micro:', error);
-    notify("Ntibyashoboka kubona uruhusha rwa microphone.");
-    return;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch (second) { error = second; }
+    if (!stream) {
+      const name = error?.name || '';
+      notify(name === 'NotAllowedError' || name === 'SecurityError'
+        ? 'Micro refusé. iPhone : Réglages > Safari > Micro (ou Réglages > TRUE CHAT) → Autoriser, puis rouvrez l’app.'
+        : name === 'NotFoundError' ? 'Aucun micro trouvé sur cet appareil.'
+        : name === 'NotReadableError' ? 'Le micro est utilisé par une autre application.'
+        : 'Micro indisponible : ' + (error?.message || name));
+      return;
+    }
   }
   try {
     const mime = pickAudioMime();
-    const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    let recorder;
+    try { recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); } catch (mimeError) { recorder = new MediaRecorder(stream); }
     voice.stream = stream;
     voice.recorder = recorder;
     voice.chunks = [];
@@ -2236,7 +2244,7 @@ $('statusFind')?.addEventListener('input', () => {
   renderStatusStrip();
 });
 /* ---------- Lecteur plein écran ---------- */
-const viewer = { g: 0, s: 0, token: 0, timer: null };
+const viewer = { g: 0, s: 0, token: 0, timer: null, sheet: false };
 function stopViewerTimer() {
   clearTimeout(viewer.timer);
   viewer.timer = null;
@@ -2314,6 +2322,7 @@ async function showViewerStatus() {
   const stage = $('vStage');
   stage.replaceChildren();
   markViewed(item.id);
+  renderViewerActions(group, item);
   const startTimer = ms => {
     current.style.transition = 'width ' + ms + 'ms linear';
     requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -2388,6 +2397,171 @@ async function showViewerStatus() {
     stage.append(caption);
   }
 }
+
+/* =====================================================
+   STATUTS : VUES, « J'AIME » ET TÉLÉCHARGEMENT
+   (tables status_views / status_likes : voir SETUP-statuts.sql)
+===================================================== */
+const STATUS_LIKES_KEY = 'truechat_status_likes';
+const statusFeat = { views: true, likes: true };
+function likedSet() {
+  try { return new Set(JSON.parse(localStorage.getItem(STATUS_LIKES_KEY) || '[]')); } catch (error) { return new Set(); }
+}
+function saveLiked(set) {
+  try { localStorage.setItem(STATUS_LIKES_KEY, JSON.stringify([...set].slice(-500))); } catch (error) { /* ignoré */ }
+}
+const missingTable = error => /relation|does not exist|schema cache|42P01|PGRST20\d/i.test(((error && error.message) || '') + ((error && error.code) || ''));
+const svgHeart = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 20.500s-7.500-4.600-7.500-10A4.500 4.500 0 0 1 12 7.800a4.500 4.500 0 0 1 7.500 2.700c0 5.400-7.500 10-7.500 10Z"/></svg>';
+const svgEye = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.600-6.500 10-6.500S22 12 22 12s-3.600 6.500-10 6.500S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>';
+const svgDownOld = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.200" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4.500-4.500M12 15l4.500-4.500"/><path d="M5 19h14"/></svg>';
+const svgDown = '<img class="gi" src="ic-download.png" alt="" style="width:26px;height:26px">';
+async function recordStatusView(item) {
+  if (!db || !me || !statusFeat.views || item._viewSent || !navigator.onLine) return;
+  item._viewSent = true;
+  try {
+    const { error } = await db.from('status_views')
+      .upsert({ status_id: item.id, viewer_id: me.id }, { onConflict: 'status_id,viewer_id', ignoreDuplicates: true });
+    if (error) throw error;
+  } catch (error) {
+    if (missingTable(error)) statusFeat.views = false; else console.warn('Vue du statut:', error);
+  }
+}
+async function loadViewCount(item) {
+  if (!db || !statusFeat.views || !navigator.onLine) return null;
+  try {
+    const { count, error } = await db.from('status_views')
+      .select('viewer_id', { count: 'exact', head: true }).eq('status_id', item.id);
+    if (error) throw error;
+    return count || 0;
+  } catch (error) {
+    if (missingTable(error)) statusFeat.views = false;
+    return null;
+  }
+}
+async function statusTextBlob(item, group) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1080; canvas.height = 1920;
+  const g = canvas.getContext('2d');
+  const bg = item.bg || avatarColor((group?.userId || '') + 'x');
+  g.fillStyle = /gradient|url/i.test(bg) ? avatarColor((group?.userId || '') + 'x') : bg;
+  g.fillRect(0, 0, 1080, 1920);
+  g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = '700 72px sans-serif';
+  const words = String(item.content || '').split(/\s+/); const lines = []; let line = '';
+  words.forEach(word => { const next = line ? line + ' ' + word : word; if (g.measureText(next).width > 900 && line) { lines.push(line); line = word; } else line = next; });
+  if (line) lines.push(line);
+  lines.forEach((text, i) => g.fillText(text, 540, 960 + (i - (lines.length - 1) / 2) * 96));
+  return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+}
+async function downloadStatus(item, group) {
+  try {
+    if (item.media_path) {
+      const url = await statusUrl(item.media_path);
+      if (!url) throw new Error('Média indisponible (hors ligne ?)');
+      const ext = (item.media_path.split('.').pop() || 'bin').toLowerCase();
+      await saveMediaFile(url, 'statut-' + String(item.id).slice(0, 8) + '.' + ext, item.type === 'video' ? 'video/mp4' : 'image/jpeg');
+    } else {
+      const blob = await statusTextBlob(item, group);
+      const url = URL.createObjectURL(blob);
+      await saveMediaFile(url, 'statut.png', 'image/png');
+      setTimeout(() => URL.revokeObjectURL(url), 15000);
+    }
+  } catch (error) {
+    errorMessage(error);
+  }
+}
+async function toggleStatusLike(item, button, downloadBtn) {
+  const set = likedSet();
+  const was = set.has(item.id);
+  if (was) set.delete(item.id); else set.add(item.id);
+  saveLiked(set);
+  button.classList.toggle('on', !was);
+  downloadBtn.hidden = was;
+  if (!was) notify('Statut aimé — vous pouvez le télécharger.');
+  if (!db || !me || !statusFeat.likes) return;
+  try {
+    const { error } = was
+      ? await db.from('status_likes').delete().eq('status_id', item.id).eq('user_id', me.id)
+      : await db.from('status_likes').upsert({ status_id: item.id, user_id: me.id }, { onConflict: 'status_id,user_id', ignoreDuplicates: true });
+    if (error) throw error;
+  } catch (error) {
+    if (missingTable(error)) statusFeat.likes = false; else console.warn('J’aime du statut:', error);
+  }
+}
+function renderViewerActions(group, item) {
+  const box = $('vActions');
+  if (!box) return;
+  box.replaceChildren();
+  if (!me) return;
+  const make = (cls, html, fn) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = cls; b.innerHTML = html;
+    b.addEventListener('click', event => { event.stopPropagation(); fn(b); });
+    return b;
+  };
+  const dl = make('', svgDown + '<span>Télécharger</span>', () => downloadStatus(item, group));
+  if (group.isMe) {
+    const eyes = make('', svgEye + '<span>Vues</span>', () => openViewersSheet(item));
+    box.append(eyes, dl);
+    loadViewCount(item).then(n => {
+      if (n !== null) eyes.querySelector('span').textContent = n + (n > 1 ? ' vues' : ' vue');
+    });
+    return;
+  }
+  recordStatusView(item);
+  const liked = likedSet().has(item.id);
+  const heart = make('like' + (liked ? ' on' : ''), svgHeart + '<span>J’aime</span>', b => toggleStatusLike(item, b, dl));
+  dl.hidden = !liked;
+  box.append(heart, dl);
+  if (!liked && db && statusFeat.likes && navigator.onLine) {
+    db.from('status_likes').select('status_id').eq('status_id', item.id).eq('user_id', me.id).maybeSingle()
+      .then(({ data }) => {
+        if (data && statusOrder[viewer.g]?.items[viewer.s] === item) {
+          const set = likedSet(); set.add(item.id); saveLiked(set);
+          heart.classList.add('on'); dl.hidden = false;
+        }
+      }).catch(() => {});
+  }
+}
+async function openViewersSheet(item) {
+  stopViewerTimer();
+  viewer.sheet = true;
+  sheetOpen('Vues du statut', body => body.append(mk('p', 'hint', 'Chargement…')));
+  const body = $('optBody');
+  try {
+    if (!navigator.onLine) throw new Error('offline');
+    const [views, likes] = await Promise.all([
+      db.from('status_views').select('viewer_id, viewed_at').eq('status_id', item.id).order('viewed_at', { ascending: false }),
+      db.from('status_likes').select('user_id').eq('status_id', item.id)
+    ]);
+    if (views.error) throw views.error;
+    const liked = new Set((likes.error ? [] : likes.data || []).map(row => row.user_id));
+    const rows = views.data || [];
+    const names = new Map();
+    const ids = [...new Set(rows.map(row => row.viewer_id))];
+    if (ids.length) {
+      const { data: people } = await db.from('profiles').select('id, full_name').in('id', ids);
+      (people || []).forEach(person => names.set(person.id, person.full_name || 'Utilisateur'));
+    }
+    body.replaceChildren(mk('p', 'hint', rows.length + (rows.length > 1 ? ' vues' : ' vue') + ' · ' + liked.size + ' j’aime'));
+    if (!rows.length) body.append(mk('p', 'hint', 'Personne n’a encore vu ce statut.'));
+    rows.forEach(row => {
+      const name = names.get(row.viewer_id) || 'Utilisateur';
+      const line = mk('div', 'vw-row', '');
+      const avatar = mk('span', 'avatar', initials(name));
+      avatar.style.background = avatarColor(name);
+      const info = mk('div', 'vw-n', '');
+      info.append(mk('b', '', name), mk('small', '', statusTimeLabel(row.viewed_at)));
+      line.append(avatar, info);
+      if (liked.has(row.viewer_id)) line.append(mk('span', 'vw-h', '♥'));
+      body.append(line);
+    });
+  } catch (error) {
+    body.replaceChildren(mk('p', 'hint', error?.message === 'offline'
+      ? 'Connectez-vous à internet pour voir les vues.'
+      : (missingTable(error) ? 'Exécutez SETUP-statuts.sql dans Supabase (SQL Editor) pour activer les vues.' : 'Impossible de charger les vues.')));
+  }
+}
+
 $('vNext')?.addEventListener('click', viewerNext);
 $('vPrev')?.addEventListener('click', viewerPrev);
 $('vClose')?.addEventListener('click', closeStatusViewer);
@@ -2426,6 +2600,127 @@ document.addEventListener('keydown', event => {
   if (event.key === 'ArrowRight') viewerNext();
   if (event.key === 'ArrowLeft') viewerPrev();
 });
+/* =====================================================
+   STATUT EN LIGNE / « VU À »  (Supabase Realtime Presence + profiles.last_seen)
+===================================================== */
+const onlineIds = new Set();
+const lastSeenCache = new Map();
+let presenceChannel = null;
+let presenceTimer = null;
+function seenLabel(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const hour = date.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  const days = Math.floor((new Date().setHours(0, 0, 0, 0) - new Date(date).setHours(0, 0, 0, 0)) / 86400000);
+  if (days <= 0) return 'vu à ' + hour;
+  if (days === 1) return 'vu hier à ' + hour;
+  return 'vu le ' + date.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
+}
+function refreshPresence() {
+  document.querySelectorAll('.chat-row[data-other]').forEach(row =>
+    row.querySelector('.avatar')?.classList.toggle('is-online', onlineIds.has(row.dataset.other)));
+  let el = $('roomPresence');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'roomPresence';
+    $('roomInfo')?.after(el);
+  }
+  if (!room || !roomOtherId || prefs.showOnline === false) { el.textContent = ''; return; }
+  if (onlineIds.has(roomOtherId)) { el.textContent = 'en ligne'; el.className = 'on'; return; }
+  const seen = lastSeenCache.get(roomOtherId);
+  el.className = '';
+  el.textContent = seen ? seenLabel(seen) : '';
+}
+async function touchLastSeen(value) {
+  if (!db || !me || !navigator.onLine) return;
+  try {
+    await db.from('profiles').update({ last_seen: value === undefined ? new Date().toISOString() : value }).eq('id', me.id);
+  } catch (error) { /* colonne absente : ignoré */ }
+}
+async function fetchLastSeen() {
+  if (!db || !room || !roomOtherId || !navigator.onLine || onlineIds.has(roomOtherId) || prefs.showOnline === false) return;
+  try {
+    const { data } = await db.from('profiles').select('last_seen').eq('id', roomOtherId).maybeSingle();
+    if (data?.last_seen) lastSeenCache.set(roomOtherId, data.last_seen);
+  } catch (error) { /* ignoré */ }
+  refreshPresence();
+}
+function startPresence() {
+  if (presenceChannel || !db || !me || prefs.showOnline === false) return;
+  presenceChannel = db.channel('truechat-presence', { config: { presence: { key: me.id } } });
+  presenceChannel
+    .on('presence', { event: 'sync' }, () => {
+      onlineIds.clear();
+      Object.keys(presenceChannel.presenceState()).forEach(id => { if (id !== me.id) onlineIds.add(id); });
+      refreshPresence();
+    })
+    .subscribe(async status => {
+      if (status === 'SUBSCRIBED' && !document.hidden) await presenceChannel.track({ at: Date.now() });
+    });
+  touchLastSeen();
+  clearInterval(presenceTimer);
+  presenceTimer = setInterval(() => { if (!document.hidden) { touchLastSeen(); fetchLastSeen(); } refreshPresence(); }, 20000);
+}
+function stopPresence() {
+  clearInterval(presenceTimer);
+  presenceTimer = null;
+  if (presenceChannel && db) db.removeChannel(presenceChannel);
+  presenceChannel = null;
+  onlineIds.clear();
+  refreshPresence();
+}
+document.addEventListener('visibilitychange', () => {
+  if (!presenceChannel) return;
+  if (document.hidden) { presenceChannel.untrack(); touchLastSeen(); }
+  else { presenceChannel.track({ at: Date.now() }); touchLastSeen(); fetchLastSeen(); }
+});
+window.addEventListener('pagehide', () => { if (presenceChannel) touchLastSeen(); });
+$('onlineToggle')?.addEventListener('change', () => {
+  prefs.showOnline = $('onlineToggle').checked;
+  savePrefs();
+  if (prefs.showOnline) startPresence();
+  else { stopPresence(); touchLastSeen(null); }
+});
+setInterval(() => { if (room && !$('room')?.hidden) fetchLastSeen(); }, 30000);
+/* =====================================================
+   ÉMOJIS → ICÔNES 3D (partout dans l'app, y compris les textes générés)
+===================================================== */
+const EMOJI_ICONS = { '⬇': 'download', '🎤': 'mic', '📄': 'scroll', '🎥': 'cam2', '📷': 'camera', '⏳': 'hourglass', '🔕': 'bell' };
+const EMOJI_RE = /(⬇\uFE0F?|🎤|📄|🎥|📷|⏳|🔕)/u;
+function iconizeNode(node) {
+  const parent = node.parentNode;
+  if (!parent || /^(INPUT|TEXTAREA|SCRIPT|STYLE|OPTION|TITLE)$/.test(parent.nodeName)) return;
+  const text = node.nodeValue;
+  if (!text || !EMOJI_RE.test(text)) return;
+  const fragment = document.createDocumentFragment();
+  text.split(new RegExp(EMOJI_RE.source, 'gu')).forEach(part => {
+    const key = part.replace(/\uFE0F/g, '');
+    if (EMOJI_ICONS[key]) {
+      const img = document.createElement('img');
+      img.src = 'ic-' + EMOJI_ICONS[key] + '.png';
+      img.className = 'ei';
+      img.alt = '';
+      img.draggable = false;
+      fragment.append(img);
+    } else if (part) fragment.append(document.createTextNode(part));
+  });
+  parent.replaceChild(fragment, node);
+}
+function iconizeTree(root) {
+  if (root.nodeType === 3) { iconizeNode(root); return; }
+  if (root.nodeType !== 1) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach(iconizeNode);
+}
+new MutationObserver(mutations => {
+  for (const mutation of mutations) {
+    if (mutation.type === 'characterData') iconizeNode(mutation.target);
+    else mutation.addedNodes.forEach(iconizeTree);
+  }
+}).observe(document.body, { childList: true, subtree: true, characterData: true });
+iconizeTree(document.body);
 /* =====================================================
    NOTIFICATIONS
 ===================================================== */
@@ -2809,6 +3104,10 @@ window.addEventListener('pageshow', () => document.body.classList.remove('blurre
 let optScope = null;    // identifiant de discussion, ou null = réglage général
 function closeSheet() {
   $show('optSheet', false);
+  if (typeof viewer !== 'undefined' && viewer.sheet) {
+    viewer.sheet = false;
+    if ($('statusViewer') && !$('statusViewer').hidden) showViewerStatus();
+  }
 }
 $('optClose')?.addEventListener('click', closeSheet);
 $('optSheet')?.addEventListener('click', event => {
@@ -2837,6 +3136,17 @@ function optRow(label, value, onClick, opts = {}) {
   const left = document.createElement('span');
   left.className = 'opt-l';
   const b = document.createElement('b');
+  const iconMatch = /^(🖼|⭐|🎨|⏱|🔒|🛡|🔐)\uFE0F?\s*/u.exec(label);
+  if (iconMatch) {
+    const file = { '🖼': 'gallery', '⭐': 'star', '🎨': 'photos', '⏱': 'hourglass', '🔒': 'lock', '🛡': 'safe', '🔐': 'shield' }[iconMatch[1]];
+    const img = document.createElement('img');
+    img.src = 'ic-' + file + '.png';
+    img.className = 'gi opt-ic';
+    img.alt = '';
+    left.classList.add('has-ic');
+    left.append(img);
+    label = label.slice(iconMatch[0].length);
+  }
   b.textContent = label;
   left.append(b);
   if (opts.hint) {
@@ -3612,14 +3922,14 @@ const LOOKS = [
 ];
 const LOOK_KEY = 'truechat.look';
 function currentLook() {
-  try { return localStorage.getItem(LOOK_KEY) || ''; } catch (error) { return ''; }
+  try { const v = localStorage.getItem(LOOK_KEY); return v === null ? 'spheres' : (v === 'classic' ? '' : v); } catch (error) { return 'spheres'; }
 }
 function applyLook(id) {
   if (id) document.documentElement.dataset.look = id;
   else delete document.documentElement.dataset.look;
   try {
     if (id) localStorage.setItem(LOOK_KEY, id);
-    else localStorage.removeItem(LOOK_KEY);
+    else localStorage.setItem(LOOK_KEY, 'classic');
   } catch (error) { /* ignoré */ }
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', id ? '#12012a' : '#050a18');
   renderSettingsRows();
@@ -3658,6 +3968,7 @@ function renderSettingsRows() {
   }
   if ($('rvPrivacy')) $('rvPrivacy').textContent = prefs.adv.global ? 'Activée' : 'Désactivée';
   if ($('lockToggle')) $('lockToggle').checked = Boolean(prefs.lockAll);
+  if ($('onlineToggle')) $('onlineToggle').checked = prefs.showOnline !== false;
 }
 const settingsRowActions = {
   setMedia: () => openMediaSheet(),
@@ -4126,8 +4437,11 @@ function startInbox() {
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' },
       payload => onIncoming(payload.new))
     .subscribe();
+  setTimeout(askNotificationOnce, 2500);
+  startPresence();
 }
 function stopInbox() {
+  stopPresence();
   if (inboxChannel && db) db.removeChannel(inboxChannel);
   inboxChannel = null;
 }
@@ -4151,12 +4465,34 @@ function onIncoming(message) {
   const watching = room === message.conversation_id && !document.hidden;
   if (watching || prefs.muted[message.conversation_id]) return;
   const row = chatRows.find(item => item.id === message.conversation_id);
+  const alertTitle = row?.name || 'Nouveau message';
+  const alertBody = advFor(message.conversation_id) ? 'Message masqué' : (previewOf(message).text || 'Nouveau message');
   messageAlert(row?.isGroup ? 'group' : 'person');
-  showBanner(
-    row?.name || 'Nouveau message',
-    advFor(message.conversation_id) ? 'Message masqué' : (previewOf(message).text || 'Nouveau message'),
-    message.conversation_id
-  );
+  if (document.hidden) systemNotify(alertTitle, alertBody, message.conversation_id);
+  else showBanner(alertTitle, alertBody, message.conversation_id);
+}
+// Notification système (bannière + son du téléphone) quand l'app est en arrière-plan
+async function systemNotify(title, body, roomId) {
+  try {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    const options = {
+      body, icon: './icon-192.png', badge: './icon-192.png', tag: 'room-' + roomId,
+      renotify: true, vibrate: [120, 60, 120], silent: false, data: { conversation_id: roomId }
+    };
+    const reg = await navigator.serviceWorker?.getRegistration();
+    if (reg) await reg.showNotification(title, options); else new Notification(title, options);
+  } catch (error) { console.warn('Notification:', error); }
+}
+function askNotificationOnce() {
+  try {
+    if (!('Notification' in window) || Notification.permission !== 'default' || localStorage.getItem('truechat.notifAsked')) return;
+  } catch (error) { return; }
+  const handler = async () => {
+    document.removeEventListener('pointerup', handler, true);
+    try { localStorage.setItem('truechat.notifAsked', '1'); } catch (error) { /* ignoré */ }
+    if (await glassConfirm('Recevez une notification avec un son à chaque nouveau message.', 'Autoriser', 'Activer les notifications ?')) enablePush();
+  };
+  document.addEventListener('pointerup', handler, true);
 }
 
 /* =====================================================
@@ -4282,8 +4618,10 @@ function renderChatList() {
     const unread = chatUnread(row);
     const item = mk('button', 'chat-row' + (unread ? ' unread' : ''));
     item.type = 'button';
+    if (row.otherId) item.dataset.other = row.otherId;
     const avatar = mk('span', 'avatar');
     setAvatar(avatar, row.avatarUrl, row.name);
+    if (row.otherId && onlineIds.has(row.otherId)) avatar.classList.add('is-online');
     const name = mk('span', 'name', row.name + (prefs.muted[row.id] ? ' 🔕' : '') + (prefs.favorites[row.id] ? ' ♥' : ''));
     const time = mk('span', 'time', formatChatTime(row.time));
     const msg = mk('span', 'msg');
@@ -5768,18 +6106,18 @@ async function enablePush() {
     notify("Notifications ntizishoboka hano. Kuri iPhone, banza ushyire app kuri Home Screen.");
     return;
   }
-  if (!cfg?.vapidPublicKey) {
-    notify('Clé VAPID manquante dans la configuration (vapidPublicKey).');
-    return;
-  }
   try {
-    const permission = await Notification.requestPermission();
+    const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
     if (permission !== 'granted') {
-      notify("Uruhusha rwa notifications ntirwatanzwe.");
+      notify("Notifications refusées. Activez-les dans les réglages du téléphone pour TRUE CHAT.");
+      return;
+    }
+    if (!cfg?.vapidPublicKey) {
+      notify("Notifications activées (son + bannière quand l’app est ouverte ou en arrière-plan). Pour recevoir aussi app fermée : ajoutez la clé VAPID (README 15).");
       return;
     }
     await savePushSubscription(await getPushSubscription());
-    notify("Notifications zifunguwe.");
+    notify("Notifications activées, même app fermée.");
   } catch (error) {
     errorMessage(error);
   }
