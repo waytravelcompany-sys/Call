@@ -1,5 +1,5 @@
 /* TRUE CHAT — service worker : installation PWA, mode hors-ligne et notifications push */
-const CACHE = 'truechat-shell-v5';
+const CACHE = 'truechat-shell-v7';
 const CDN_CACHE = 'truechat-cdn-v1';
 const IMG_CACHE = 'truechat-img-v1';
 const SHELL = [
@@ -9,7 +9,11 @@ const SHELL = [
   './manifest.webmanifest',
   './icon-192.png',
   './icon-512.png',
-  './apple-touch-icon.png'
+  './apple-touch-icon.png',
+  './icon-maskable-512.png',
+  './ic-camera.png','./ic-gallery.png','./ic-ai.png','./ic-music.png','./ic-shield.png','./ic-lock.png',
+  './ic-star.png','./ic-safe.png','./ic-phone.png','./ic-photos.png','./ic-chat.png',
+  './ic-scroll.png','./ic-download.png','./ic-bell.png','./ic-cam2.png','./ic-hourglass.png','./ic-mic.png'
 ];
 // Bibliothèque Supabase (chargée depuis esm.sh) : nécessaire pour ouvrir l'app sans réseau
 const SUPABASE_ENTRY = 'https://esm.sh/@supabase/supabase-js@2';
@@ -156,6 +160,8 @@ self.addEventListener('push', event => {
       badge: './icon-192.png',
       tag: data.tag || data.conversation_id || 'truechat',
       renotify: true,
+      vibrate: [120, 60, 120],
+      silent: false,
       data: { conversation_id: data.conversation_id || null }
     })
   );
