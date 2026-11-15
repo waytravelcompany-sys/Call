@@ -6,7 +6,6 @@ const SHELL = [
   './',
   './index.html',
   './config.js',
-  './app.js',
   './manifest.webmanifest',
   './icon-192.png',
   './icon-512.png',

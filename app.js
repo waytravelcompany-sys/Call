@@ -2244,12 +2244,41 @@ $('statusFind')?.addEventListener('input', () => {
   renderStatusStrip();
 });
 /* ---------- Lecteur plein écran ---------- */
-const viewer = { g: 0, s: 0, token: 0, timer: null, sheet: false };
+const viewer = { g: 0, s: 0, token: 0, timer: null, sheet: false, paused: false, dur: 0, left: 0, t0: 0, fill: null };
 function stopViewerTimer() {
   clearTimeout(viewer.timer);
   viewer.timer = null;
   const video = $('vStage')?.querySelector('video');
   if (video) video.pause();
+}
+/* ----- Maintenir appuyé = pause ; relâcher = reprise ----- */
+function pauseViewer() {
+  if (viewer.paused || $('statusViewer')?.hidden !== false) return;
+  viewer.paused = true;
+  $('statusViewer').classList.add('paused');
+  const video = $('vStage')?.querySelector('video');
+  if (video) { video.pause(); return; }
+  if (viewer.timer && viewer.fill) {
+    clearTimeout(viewer.timer);
+    viewer.timer = null;
+    viewer.left = Math.max(0, viewer.left - (Date.now() - viewer.t0));
+    viewer.fill.style.width = getComputedStyle(viewer.fill).width;
+    viewer.fill.style.transition = 'none';
+  }
+}
+function resumeViewer() {
+  if (!viewer.paused) return;
+  viewer.paused = false;
+  $('statusViewer')?.classList.remove('paused');
+  const video = $('vStage')?.querySelector('video');
+  if (video) { video.play().catch(() => {}); return; }
+  if (viewer.fill && viewer.left > 0 && !viewer.timer) {
+    const fill = viewer.fill;
+    viewer.t0 = Date.now();
+    fill.style.transition = 'width ' + viewer.left + 'ms linear';
+    requestAnimationFrame(() => requestAnimationFrame(() => { fill.style.width = '100%'; }));
+    viewer.timer = setTimeout(viewerNext, viewer.left);
+  }
 }
 function openStatusViewer(group) {
   const index = statusOrder.indexOf(group);
@@ -2264,6 +2293,8 @@ function openStatusViewer(group) {
 }
 function closeStatusViewer() {
   stopViewerTimer();
+  viewer.paused = false;
+  $('statusViewer').classList.remove('paused');
   viewer.token += 1;
   $('statusViewer').hidden = true;
   $('vStage').replaceChildren();
@@ -2294,6 +2325,8 @@ function viewerPrev() {
 }
 async function showViewerStatus() {
   stopViewerTimer();
+  viewer.paused = false;
+  $('statusViewer')?.classList.remove('paused');
   const token = ++viewer.token;
   const group = statusOrder[viewer.g];
   const item = group?.items[viewer.s];
@@ -2324,6 +2357,11 @@ async function showViewerStatus() {
   markViewed(item.id);
   renderViewerActions(group, item);
   const startTimer = ms => {
+    viewer.fill = current;
+    viewer.dur = ms;
+    viewer.left = ms;
+    viewer.t0 = Date.now();
+    if (viewer.paused) return; /* l'utilisateur maintient déjà : la reprise lancera le minuteur */
     current.style.transition = 'width ' + ms + 'ms linear';
     requestAnimationFrame(() => requestAnimationFrame(() => {
       current.style.width = '100%';
@@ -2562,8 +2600,28 @@ async function openViewersSheet(item) {
   }
 }
 
-$('vNext')?.addEventListener('click', viewerNext);
-$('vPrev')?.addEventListener('click', viewerPrev);
+let holdTimer = null, held = false;
+['vPrev', 'vNext'].forEach(id => {
+  const zone = $(id);
+  if (!zone) return;
+  const release = () => {
+    clearTimeout(holdTimer);
+    holdTimer = null;
+    if (held) {
+      resumeViewer();
+      setTimeout(() => { held = false; }, 80); /* ignore le « clic » qui suit le relâchement */
+    }
+  };
+  zone.addEventListener('pointerdown', () => {
+    held = false;
+    clearTimeout(holdTimer);
+    holdTimer = setTimeout(() => { held = true; pauseViewer(); }, 220);
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(name => zone.addEventListener(name, release));
+  zone.addEventListener('contextmenu', event => event.preventDefault());
+});
+$('vNext')?.addEventListener('click', () => { if (!held) viewerNext(); });
+$('vPrev')?.addEventListener('click', () => { if (!held) viewerPrev(); });
 $('vClose')?.addEventListener('click', closeStatusViewer);
 $('vDelete')?.addEventListener('click', async event => {
   event.stopPropagation();
