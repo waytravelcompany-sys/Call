@@ -1,0 +1,5 @@
+# Dosiye za Visual Studio (ntizijya kuri GitHub)
+.vs/
+*.suo
+*.user
+Thumbs.db
