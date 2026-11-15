@@ -6393,13 +6393,35 @@ if (!ready) {
   authListener = data?.subscription;
   // Démarrage rapide : session déjà enregistrée sur l'appareil → on ouvre tout de suite,
   // sans attendre le réseau (en ligne ou hors-ligne). La connexion n'est demandée qu'une fois.
-  const quickUser = storedUser();
+  /* Remise à zéro : changer APP_RESET force tout le monde à se réinscrire / reconnecter */
+  const APP_RESET = '2026-11-16-1';
+  let resetNow = false;
+  try { resetNow = localStorage.getItem('truechat.reset') !== APP_RESET; } catch (error) { /* ignoré */ }
+  if (resetNow) {
+    try {
+      const keep = ['truechat.look'];
+      const kept = keep.map(k => [k, localStorage.getItem(k)]);
+      localStorage.clear();
+      kept.forEach(([k, v]) => { if (v !== null) localStorage.setItem(k, v); });
+      localStorage.setItem('truechat.reset', APP_RESET);
+      sessionStorage.clear();
+    } catch (error) { /* ignoré */ }
+    try { indexedDB.deleteDatabase('truechat'); } catch (error) { /* ignoré */ }
+    try {
+      navigator.serviceWorker?.ready
+        ?.then(reg => reg.pushManager?.getSubscription())
+        .then(sub => sub?.unsubscribe())
+        .catch(() => {});
+    } catch (error) { /* ignoré */ }
+    db.auth.signOut({ scope: 'local' }).catch(() => {});
+  }
+  const quickUser = resetNow ? null : storedUser();
   if (quickUser) {
     me = quickUser;
     bootedFor = quickUser.id;
     initialize().catch(errorMessage);
   }
-  db.auth.getSession()
+  (resetNow ? Promise.resolve({ data: { session: null }, error: null }) : db.auth.getSession())
     .then(({ data: sessionData, error }) => {
       if (error && !isNetworkError(error)) throw error;
       const sessionUser = sessionData?.session?.user;
