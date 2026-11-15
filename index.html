@@ -616,6 +616,21 @@ body { color: #f2f6ff; }
 /* ---------- fond animé : des boules qui flottent lentement ---------- */
 #bg { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; background: #04071a; }
 #bg::after { content: ""; position: absolute; inset: 0; background: rgba(3, 6, 22, .26); }
+#bg.haswall { background-size: cover; background-position: center; background-repeat: no-repeat; }
+#bg.haswall i { display: none; }
+#bg.haswall::after { background: rgba(0, 0, 0, var(--walldim, .25)); }
+.auth-credit, .p-credit { text-align: center; color: rgba(255,255,255,.62); font-size: 12.5px; margin: 14px 0 6px; letter-spacing: .02em; }
+.auth-credit b, .p-credit b { color: #9be9ff; font-weight: 800; }
+.p-credit { margin: 18px 0 26px; }
+.about-head { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 6px 0 4px; }
+.about-head img { width: 84px; height: 84px; border-radius: 22px; box-shadow: 0 10px 30px rgba(30,139,255,.35); }
+.about-head h3 { margin: 12px 0 2px; font-size: 22px; }
+.about-head small { color: var(--gray); }
+.about-list { margin: 10px 0 0; padding: 0; list-style: none; }
+.about-list li { padding: 10px 12px; margin-top: 8px; border-radius: 14px; background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.12); font-size: 14.5px; line-height: 1.35; }
+.about-list li b { display: block; color: #9be9ff; font-size: 13px; margin-bottom: 2px; }
+.opt-range { width: 100%; margin: 12px 0 4px; accent-color: #5ee9ff; }
+.wall-thumb { width: 38px; height: 38px; border-radius: 10px; object-fit: cover; margin-right: 2px; }
 #bg i { position: absolute; border-radius: 50%; will-change: transform; }
 #bg .b1 { width: 84vmin; height: 84vmin; left: -28vmin; top: -16vmin;
   background: linear-gradient(145deg, #00d9ff 0%, #1a6bff 55%, #0b2fe0 100%); animation: orb1 15s ease-in-out infinite alternate; }
@@ -1256,6 +1271,7 @@ html[data-look] .bubble.mine { background-image: linear-gradient(165deg, rgba(25
           </div>
           <button type="submit" id="authSubmit" class="btn-liquid"><span>Se connecter</span></button>
         </form>
+        <p class="auth-credit">Créé par <b>Bruce Designer</b></p>
         <p class="switch-line"><span id="toggleLead">Pas encore de compte ?</span> <button class="link" id="toggleAuth" type="button">Créer un compte</button></p>
       </div>
 
@@ -1449,6 +1465,17 @@ html[data-look] .bubble.mine { background-image: linear-gradient(165deg, rgba(25
       </div>
 
       <div class="p-group glow">
+        <button type="button" class="p-row" id="setWallpaper">
+          <img class="ri gi" src="ic-photos.png" alt="" draggable="false">
+          <span class="rl two"><b>Fond d’écran</b><small>Une photo de votre galerie pour la liste et les conversations.</small></span><span class="chev">›</span>
+        </button>
+        <button type="button" class="p-row" id="setAbout">
+          <img class="ri" src="icon-192.png" alt="" draggable="false" style="border-radius:8px">
+          <span class="rl">À propos · Bruce Designer</span><span class="chev">›</span>
+        </button>
+      </div>
+
+      <div class="p-group glow">
         <button type="button" class="p-row" id="settingsNotifications">
           <img class="ri gi" src="ic-bell.png" alt="" draggable="false">
           <span class="rl">Notifications</span><span class="rv"></span><span class="chev">›</span>
@@ -1467,6 +1494,7 @@ html[data-look] .bubble.mine { background-image: linear-gradient(165deg, rgba(25
           <span class="rl">Déconnexion</span>
         </button>
       </div>
+      <p class="p-credit">TRUE CHAT · version 1.0<br>Créé par <b>Bruce Designer</b></p>
     </section>
 
     <!-- ----- NAVIGATION DU BAS ----- -->
@@ -4846,6 +4874,7 @@ function applyRoomLook() {
   const eph = ephemeralFor(room);
   if (eph) info.push('⏱ Éphémères : ' + ephemeralLabel(eph));
   if ($('roomInfo')) $('roomInfo').textContent = info.join(' · ');
+  applyWalls();
 }
 
 /* =====================================================
@@ -5164,6 +5193,169 @@ function renderBgSection(box) {
   }));
 }
 
+/* ---------- Fonds d'écran (photo de la galerie) ---------- */
+const WALL_DIM_KEY = 'truechat.wall.dim';
+const wallKey = k => 'truechat.wall.' + k;
+function wallGet(k) { try { return localStorage.getItem(wallKey(k)) || null; } catch (error) { return null; } }
+function wallSet(k, v) {
+  try {
+    if (v) localStorage.setItem(wallKey(k), v); else localStorage.removeItem(wallKey(k));
+    return true;
+  } catch (error) { return false; }
+}
+function wallDim() {
+  try { const v = parseFloat(localStorage.getItem(WALL_DIM_KEY)); return Number.isNaN(v) ? 0.25 : v; } catch (error) { return 0.25; }
+}
+function applyWalls() {
+  const dim = wallDim();
+  const bg = $('bg');
+  const home = wallGet('home');
+  if (bg) {
+    bg.style.setProperty('--walldim', String(dim));
+    bg.style.backgroundImage = home ? 'url("' + home + '")' : '';
+    bg.classList.toggle('haswall', !!home);
+  }
+  const msgs = $('messages');
+  if (msgs) {
+    const w = (room && wallGet('room:' + room)) || wallGet('chat');
+    if (w) {
+      const shade = 'linear-gradient(rgba(0,0,0,' + dim + '),rgba(0,0,0,' + dim + '))';
+      msgs.style.backgroundImage = shade + ',url("' + w + '")';
+      msgs.style.backgroundSize = 'cover';
+      msgs.style.backgroundPosition = 'center';
+      msgs.style.backgroundRepeat = 'no-repeat';
+    } else {
+      msgs.style.backgroundImage = '';
+      msgs.style.backgroundSize = '';
+      msgs.style.backgroundPosition = '';
+      msgs.style.backgroundRepeat = '';
+    }
+  }
+}
+async function shrinkImage(file, maxSide, quality) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve(im);
+      im.onerror = () => reject(new Error('Image illisible. Choisissez une photo JPEG ou PNG.'));
+      im.src = url;
+    });
+    const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', quality);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+function pickWallpaper(key, done) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.addEventListener('change', async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    try {
+      let data = await shrinkImage(file, 1280, 0.78);
+      if (!wallSet(key, data)) {
+        data = await shrinkImage(file, 800, 0.6);
+        if (!wallSet(key, data)) { notify('Image trop lourde pour cet appareil.'); return; }
+      }
+      applyWalls();
+      if (done) done();
+      notify('Fond d’écran appliqué.');
+    } catch (error) {
+      errorMessage(error);
+    }
+  });
+  input.click();
+}
+function wallRow(body, label, key, reopen) {
+  const has = wallGet(key);
+  const row = optRow(label, has ? 'Changer ›' : 'Choisir ›', () => pickWallpaper(key, reopen), { hint: has ? 'Photo définie' : 'Aucune photo' });
+  if (has) {
+    const thumb = document.createElement('img');
+    thumb.className = 'wall-thumb';
+    thumb.alt = '';
+    thumb.src = has;
+    row.querySelector('.opt-r')?.before(thumb);
+  }
+  body.append(row);
+  if (has) {
+    body.append(optRow('Retirer : ' + label, '', () => {
+      wallSet(key, null);
+      applyWalls();
+      reopen();
+    }));
+  }
+}
+function renderWallSection(body, reopen) {
+  const title = document.createElement('h4');
+  title.className = 'sec-title';
+  title.textContent = 'Fond d’écran (photo de la galerie)';
+  body.append(title);
+  body.append(scopeNote('La photo reste sur cet appareil. Elle n’est envoyée à personne.'));
+  wallRow(body, 'Liste des discussions', 'home', reopen);
+  wallRow(body, 'Dans les conversations (toutes)', 'chat', reopen);
+  if (optScope) wallRow(body, 'Cette discussion seulement', 'room:' + optScope, reopen);
+  body.append(scopeNote('Assombrir la photo (pour mieux lire les messages)'));
+  const range = document.createElement('input');
+  range.type = 'range';
+  range.className = 'opt-range';
+  range.min = '0';
+  range.max = '0.7';
+  range.step = '0.05';
+  range.value = String(wallDim());
+  range.addEventListener('input', () => {
+    try { localStorage.setItem(WALL_DIM_KEY, range.value); } catch (error) { /* ignoré */ }
+    applyWalls();
+  });
+  body.append(range);
+}
+function openWallSheet() {
+  sheetOpen('Fond d’écran', body => renderWallSection(body, openWallSheet));
+}
+$('setWallpaper')?.addEventListener('click', () => { optScope = null; openWallSheet(); });
+
+/* ---------- À propos : Bruce Designer ---------- */
+const ABOUT_PHONE = '+257 66 56 23 40';
+const ABOUT_TEL = '+25766562340';
+function openAboutSheet() {
+  sheetOpen('À propos', body => {
+    const head = document.createElement('div');
+    head.className = 'about-head';
+    const logo = document.createElement('img');
+    logo.src = 'icon-192.png';
+    logo.alt = 'TRUE CHAT';
+    head.append(logo, mk('h3', '', 'Bruce Designer'), mk('small', '', 'Designer · Développeur'));
+    body.append(head);
+    body.append(scopeNote('Bruce Designer crée des applications, des affiches, des vidéos et des sites web. Il relie le design et la technologie pour donner vie à des idées simples et utiles.'));
+    const list = document.createElement('ul');
+    list.className = 'about-list';
+    [
+      ['Applications', 'TRUE CHAT, TRUE TALK, Bibiliya, INTERNET FINDER'],
+      ['Design graphique', 'Affiches et flyers'],
+      ['Vidéo', 'Publicités et animations'],
+      ['Sites web', 'Création et mise en ligne']
+    ].forEach(([title, text]) => {
+      const li = document.createElement('li');
+      li.append(mk('b', '', title), document.createTextNode(text));
+      list.append(li);
+    });
+    body.append(list);
+    body.append(scopeNote('Pour une application, une affiche ou un site : contactez-moi.'));
+    body.append(optRow('Appeler ' + ABOUT_PHONE, '›', () => { location.href = 'tel:' + ABOUT_TEL; }));
+    body.append(optRow('WhatsApp ' + ABOUT_PHONE, '›', () => {
+      window.open('https://wa.me/' + ABOUT_TEL.replace('+', ''), '_blank', 'noopener');
+    }));
+    body.append(scopeNote('TRUE CHAT · version 1.0 · © 2026 Bruce Designer'));
+  });
+}
+$('setAbout')?.addEventListener('click', openAboutSheet);
+
 /* ---------- Thème de la discussion ---------- */
 function openThemeSheet() {
   sheetOpen('Thème de la discussion', body => {
@@ -5199,6 +5391,7 @@ function openThemeSheet() {
         openThemeSheet();
       }));
     }
+    renderWallSection(body, openThemeSheet);
     const bgBox = document.createElement('div');
     renderBgSection(bgBox);
     body.append(bgBox);
@@ -8168,6 +8361,7 @@ document.addEventListener('pointermove', event => {
 /* =====================================================
    DÉMARRAGE
 ===================================================== */
+applyWalls();
 if (!ready) {
   notify('Vérifiez config.js : URL et clé Publishable Supabase.');
 } else {

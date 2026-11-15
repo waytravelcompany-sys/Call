@@ -3051,6 +3051,7 @@ function applyRoomLook() {
   const eph = ephemeralFor(room);
   if (eph) info.push('⏱ Éphémères : ' + ephemeralLabel(eph));
   if ($('roomInfo')) $('roomInfo').textContent = info.join(' · ');
+  applyWalls();
 }
 
 /* =====================================================
@@ -3369,6 +3370,169 @@ function renderBgSection(box) {
   }));
 }
 
+/* ---------- Fonds d'écran (photo de la galerie) ---------- */
+const WALL_DIM_KEY = 'truechat.wall.dim';
+const wallKey = k => 'truechat.wall.' + k;
+function wallGet(k) { try { return localStorage.getItem(wallKey(k)) || null; } catch (error) { return null; } }
+function wallSet(k, v) {
+  try {
+    if (v) localStorage.setItem(wallKey(k), v); else localStorage.removeItem(wallKey(k));
+    return true;
+  } catch (error) { return false; }
+}
+function wallDim() {
+  try { const v = parseFloat(localStorage.getItem(WALL_DIM_KEY)); return Number.isNaN(v) ? 0.25 : v; } catch (error) { return 0.25; }
+}
+function applyWalls() {
+  const dim = wallDim();
+  const bg = $('bg');
+  const home = wallGet('home');
+  if (bg) {
+    bg.style.setProperty('--walldim', String(dim));
+    bg.style.backgroundImage = home ? 'url("' + home + '")' : '';
+    bg.classList.toggle('haswall', !!home);
+  }
+  const msgs = $('messages');
+  if (msgs) {
+    const w = (room && wallGet('room:' + room)) || wallGet('chat');
+    if (w) {
+      const shade = 'linear-gradient(rgba(0,0,0,' + dim + '),rgba(0,0,0,' + dim + '))';
+      msgs.style.backgroundImage = shade + ',url("' + w + '")';
+      msgs.style.backgroundSize = 'cover';
+      msgs.style.backgroundPosition = 'center';
+      msgs.style.backgroundRepeat = 'no-repeat';
+    } else {
+      msgs.style.backgroundImage = '';
+      msgs.style.backgroundSize = '';
+      msgs.style.backgroundPosition = '';
+      msgs.style.backgroundRepeat = '';
+    }
+  }
+}
+async function shrinkImage(file, maxSide, quality) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve(im);
+      im.onerror = () => reject(new Error('Image illisible. Choisissez une photo JPEG ou PNG.'));
+      im.src = url;
+    });
+    const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', quality);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+function pickWallpaper(key, done) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.addEventListener('change', async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    try {
+      let data = await shrinkImage(file, 1280, 0.78);
+      if (!wallSet(key, data)) {
+        data = await shrinkImage(file, 800, 0.6);
+        if (!wallSet(key, data)) { notify('Image trop lourde pour cet appareil.'); return; }
+      }
+      applyWalls();
+      if (done) done();
+      notify('Fond d’écran appliqué.');
+    } catch (error) {
+      errorMessage(error);
+    }
+  });
+  input.click();
+}
+function wallRow(body, label, key, reopen) {
+  const has = wallGet(key);
+  const row = optRow(label, has ? 'Changer ›' : 'Choisir ›', () => pickWallpaper(key, reopen), { hint: has ? 'Photo définie' : 'Aucune photo' });
+  if (has) {
+    const thumb = document.createElement('img');
+    thumb.className = 'wall-thumb';
+    thumb.alt = '';
+    thumb.src = has;
+    row.querySelector('.opt-r')?.before(thumb);
+  }
+  body.append(row);
+  if (has) {
+    body.append(optRow('Retirer : ' + label, '', () => {
+      wallSet(key, null);
+      applyWalls();
+      reopen();
+    }));
+  }
+}
+function renderWallSection(body, reopen) {
+  const title = document.createElement('h4');
+  title.className = 'sec-title';
+  title.textContent = 'Fond d’écran (photo de la galerie)';
+  body.append(title);
+  body.append(scopeNote('La photo reste sur cet appareil. Elle n’est envoyée à personne.'));
+  wallRow(body, 'Liste des discussions', 'home', reopen);
+  wallRow(body, 'Dans les conversations (toutes)', 'chat', reopen);
+  if (optScope) wallRow(body, 'Cette discussion seulement', 'room:' + optScope, reopen);
+  body.append(scopeNote('Assombrir la photo (pour mieux lire les messages)'));
+  const range = document.createElement('input');
+  range.type = 'range';
+  range.className = 'opt-range';
+  range.min = '0';
+  range.max = '0.7';
+  range.step = '0.05';
+  range.value = String(wallDim());
+  range.addEventListener('input', () => {
+    try { localStorage.setItem(WALL_DIM_KEY, range.value); } catch (error) { /* ignoré */ }
+    applyWalls();
+  });
+  body.append(range);
+}
+function openWallSheet() {
+  sheetOpen('Fond d’écran', body => renderWallSection(body, openWallSheet));
+}
+$('setWallpaper')?.addEventListener('click', () => { optScope = null; openWallSheet(); });
+
+/* ---------- À propos : Bruce Designer ---------- */
+const ABOUT_PHONE = '+257 66 56 23 40';
+const ABOUT_TEL = '+25766562340';
+function openAboutSheet() {
+  sheetOpen('À propos', body => {
+    const head = document.createElement('div');
+    head.className = 'about-head';
+    const logo = document.createElement('img');
+    logo.src = 'icon-192.png';
+    logo.alt = 'TRUE CHAT';
+    head.append(logo, mk('h3', '', 'Bruce Designer'), mk('small', '', 'Designer · Développeur'));
+    body.append(head);
+    body.append(scopeNote('Bruce Designer crée des applications, des affiches, des vidéos et des sites web. Il relie le design et la technologie pour donner vie à des idées simples et utiles.'));
+    const list = document.createElement('ul');
+    list.className = 'about-list';
+    [
+      ['Applications', 'TRUE CHAT, TRUE TALK, Bibiliya, INTERNET FINDER'],
+      ['Design graphique', 'Affiches et flyers'],
+      ['Vidéo', 'Publicités et animations'],
+      ['Sites web', 'Création et mise en ligne']
+    ].forEach(([title, text]) => {
+      const li = document.createElement('li');
+      li.append(mk('b', '', title), document.createTextNode(text));
+      list.append(li);
+    });
+    body.append(list);
+    body.append(scopeNote('Pour une application, une affiche ou un site : contactez-moi.'));
+    body.append(optRow('Appeler ' + ABOUT_PHONE, '›', () => { location.href = 'tel:' + ABOUT_TEL; }));
+    body.append(optRow('WhatsApp ' + ABOUT_PHONE, '›', () => {
+      window.open('https://wa.me/' + ABOUT_TEL.replace('+', ''), '_blank', 'noopener');
+    }));
+    body.append(scopeNote('TRUE CHAT · version 1.0 · © 2026 Bruce Designer'));
+  });
+}
+$('setAbout')?.addEventListener('click', openAboutSheet);
+
 /* ---------- Thème de la discussion ---------- */
 function openThemeSheet() {
   sheetOpen('Thème de la discussion', body => {
@@ -3404,6 +3568,7 @@ function openThemeSheet() {
         openThemeSheet();
       }));
     }
+    renderWallSection(body, openThemeSheet);
     const bgBox = document.createElement('div');
     renderBgSection(bgBox);
     body.append(bgBox);
@@ -6373,6 +6538,7 @@ document.addEventListener('pointermove', event => {
 /* =====================================================
    DÉMARRAGE
 ===================================================== */
+applyWalls();
 if (!ready) {
   notify('Vérifiez config.js : URL et clé Publishable Supabase.');
 } else {
