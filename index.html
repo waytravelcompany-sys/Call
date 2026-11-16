@@ -1272,6 +1272,7 @@ html[data-look] .bubble.mine { background-image: linear-gradient(165deg, rgba(25
           <button type="submit" id="authSubmit" class="btn-liquid"><span>Se connecter</span></button>
         </form>
         <p class="auth-credit">Créé par <b>Bruce Designer</b></p>
+        <p class="auth-credit"><button type="button" class="link" id="authLang" data-notr>🌐 Langue · Language</button></p>
         <p class="switch-line"><span id="toggleLead">Pas encore de compte ?</span> <button class="link" id="toggleAuth" type="button">Créer un compte</button></p>
       </div>
 
@@ -1465,6 +1466,10 @@ html[data-look] .bubble.mine { background-image: linear-gradient(165deg, rgba(25
       </div>
 
       <div class="p-group glow">
+        <button type="button" class="p-row" id="setLanguage">
+          <svg class="ri" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.600 2.800 3.900 5.800 3.900 9s-1.300 6.200-3.900 9c-2.600-2.800-3.900-5.800-3.900-9s1.300-6.200 3.900-9Z"/></svg>
+          <span class="rl" data-notr>Langue · Language</span><span class="rv" id="rvLang" data-notr>Français</span><span class="chev">›</span>
+        </button>
         <button type="button" class="p-row" id="setWallpaper">
           <img class="ri gi" src="ic-photos.png" alt="" draggable="false">
           <span class="rl two"><b>Fond d’écran</b><small>Une photo de votre galerie pour la liste et les conversations.</small></span><span class="chev">›</span>
@@ -1820,6 +1825,7 @@ try {
 } catch (e) {}
 </script>
 <!-- APPLICATION TRUE CHAT -->
+<script src="i18n.js"></script>
 <script type="module">
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 const $ = id => document.getElementById(id);
@@ -5193,6 +5199,132 @@ function renderBgSection(box) {
   }));
 }
 
+/* ---------- Langues (traduction de toute l'interface) ---------- */
+const LANGS = [['fr', 'Français'], ['en', 'English'], ['rn', 'Kirundi'], ['sw', 'Kiswahili'], ['es', 'Español'], ['pt', 'Português']];
+const LANG_KEY = 'truechat.lang';
+let lang = 'fr';
+try { lang = localStorage.getItem(LANG_KEY) || 'fr'; } catch (error) { /* ignoré */ }
+if (!LANGS.some(item => item[0] === lang)) lang = 'fr';
+let i18nDict = null;
+let i18nPrefixes = [];
+let i18nCountries = {};
+const i18nText = new WeakMap();   // nœud texte -> { fr, tr }
+const i18nAttr = new WeakMap();   // élément -> { attribut: { fr, tr } }
+const I18N_ATTRS = ['placeholder', 'aria-label', 'title', 'alt'];
+function i18nBuild() {
+  i18nDict = (lang !== 'fr' && window.TC_I18N && window.TC_I18N[lang]) || null;
+  i18nPrefixes = i18nDict
+    ? Object.keys(i18nDict).filter(k => /[ :,«“(]$/.test(k) && k.trim().length >= 3).sort((a, b) => b.length - a.length)
+    : [];
+  i18nCountries = {};
+  if (i18nDict && typeof Intl !== 'undefined' && Intl.DisplayNames) {
+    try {
+      const names = new Intl.DisplayNames([lang], { type: 'region', fallback: 'none' });
+      COUNTRIES_TOP.forEach(([code, frName]) => {
+        const name = names.of(code);
+        if (name && name !== code) i18nCountries[frName] = name;
+      });
+    } catch (error) { /* ignoré */ }
+  }
+}
+function i18nLookup(fr) {
+  if (!i18nDict) return fr;
+  const trimmed = fr.trim();
+  if (trimmed.length < 2) return fr;
+  if (Object.prototype.hasOwnProperty.call(i18nDict, fr)) return i18nDict[fr];
+  const lead = fr.slice(0, fr.indexOf(trimmed));
+  const trail = fr.slice(lead.length + trimmed.length);
+  if (Object.prototype.hasOwnProperty.call(i18nDict, trimmed)) return lead + i18nDict[trimmed] + trail;
+  if (i18nCountries[trimmed]) return lead + i18nCountries[trimmed] + trail;
+  for (const key of i18nPrefixes) {
+    if (fr.startsWith(key)) return i18nDict[key] + fr.slice(key.length);
+  }
+  return fr;
+}
+function i18nSkip(node) {
+  const el = node.nodeType === 1 ? node : node.parentElement;
+  if (!el) return true;
+  const tag = el.tagName;
+  if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TEXTAREA' || tag === 'NOSCRIPT') return true;
+  return !!el.closest('[data-notr]');
+}
+function i18nApplyText(node) {
+  if (i18nSkip(node)) return;
+  const rec = i18nText.get(node);
+  const cur = node.nodeValue;
+  const fr = rec && cur === rec.tr ? rec.fr : cur;
+  const tr = i18nDict ? i18nLookup(fr) : fr;
+  if (tr !== cur) node.nodeValue = tr;
+  if (tr !== fr) i18nText.set(node, { fr, tr }); else i18nText.delete(node);
+}
+function i18nApplyAttrs(el) {
+  if (!el.getAttribute || i18nSkip(el)) return;
+  let store = i18nAttr.get(el);
+  I18N_ATTRS.forEach(name => {
+    const cur = el.getAttribute(name);
+    if (cur === null) return;
+    const rec = store && store[name];
+    const fr = rec && cur === rec.tr ? rec.fr : cur;
+    const tr = i18nDict ? i18nLookup(fr) : fr;
+    if (tr !== cur) el.setAttribute(name, tr);
+    if (tr !== fr) {
+      if (!store) { store = {}; i18nAttr.set(el, store); }
+      store[name] = { fr, tr };
+    } else if (store) delete store[name];
+  });
+}
+function i18nWalk(root) {
+  if (!root) return;
+  if (root.nodeType === 3) { i18nApplyText(root); return; }
+  if (root.nodeType !== 1) return;
+  i18nApplyAttrs(root);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  let node = walker.nextNode();
+  while (node) {
+    if (node.nodeType === 3) i18nApplyText(node); else i18nApplyAttrs(node);
+    node = walker.nextNode();
+  }
+}
+let i18nObserver = null;
+function i18nStartObserver() {
+  if (i18nObserver || !window.MutationObserver) return;
+  i18nObserver = new MutationObserver(records => {
+    if (!i18nDict) return;
+    records.forEach(record => {
+      if (record.type === 'childList') record.addedNodes.forEach(i18nWalk);
+      else if (record.type === 'characterData') i18nApplyText(record.target);
+      else if (record.type === 'attributes') i18nApplyAttrs(record.target);
+    });
+  });
+  i18nObserver.observe(document.body, {
+    childList: true, subtree: true, characterData: true,
+    attributes: true, attributeFilter: I18N_ATTRS
+  });
+}
+function langName(code) { return (LANGS.find(item => item[0] === code) || LANGS[0])[1]; }
+function setLang(code) {
+  if (!LANGS.some(item => item[0] === code)) return;
+  lang = code;
+  try { localStorage.setItem(LANG_KEY, code); } catch (error) { /* ignoré */ }
+  document.documentElement.lang = code;
+  i18nBuild();
+  i18nStartObserver();
+  i18nWalk(document.body);
+  document.title = i18nDict ? 'TRUE CHAT' : document.title;
+  if ($('rvLang')) $('rvLang').textContent = langName(code);
+}
+function openLangSheet() {
+  sheetOpen('Langue · Language', body => {
+    LANGS.forEach(([code, name]) => {
+      body.append(optRow(name, '', () => { setLang(code); openLangSheet(); }, { selected: code === lang }));
+    });
+    body.append(scopeNote('TRUE CHAT · Bruce Designer'));
+  });
+}
+$('setLanguage')?.addEventListener('click', () => { optScope = null; openLangSheet(); });
+$('authLang')?.addEventListener('click', () => { optScope = null; openLangSheet(); });
+if (lang !== 'fr') setLang(lang); else { i18nBuild(); i18nStartObserver(); if ($('rvLang')) $('rvLang').textContent = langName(lang); }
+
 /* ---------- Fonds d'écran (photo de la galerie) ---------- */
 const WALL_DIM_KEY = 'truechat.wall.dim';
 const wallKey = k => 'truechat.wall.' + k;
@@ -8388,7 +8520,7 @@ if (!ready) {
   try { resetNow = localStorage.getItem('truechat.reset') !== APP_RESET; } catch (error) { /* ignoré */ }
   if (resetNow) {
     try {
-      const keep = ['truechat.look'];
+      const keep = ['truechat.look', 'truechat.lang'];
       const kept = keep.map(k => [k, localStorage.getItem(k)]);
       localStorage.clear();
       kept.forEach(([k, v]) => { if (v !== null) localStorage.setItem(k, v); });
