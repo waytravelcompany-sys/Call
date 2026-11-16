@@ -1110,6 +1110,7 @@ async function openRoom(id) {
   $('roomTitle').textContent = roomName;
   if ($('roomAvatar')) {
     setAvatar($('roomAvatar'), cached?.avatarUrl, roomName);
+    applyStatusRing($('roomAvatar'), roomOtherId);
   }
   await loadingMessages;
 }
@@ -1209,6 +1210,7 @@ async function renderMessage(message, box) {
         const data = signed ? { signedUrl: signed } : null;
         const error = signed ? null : true;
         shareUrl = signed || null;
+        bubble._mediaUrl = shareUrl;
         if (!error && data?.signedUrl) {
           if (message.type === 'image') {
             const img = document.createElement('img');
@@ -1252,6 +1254,13 @@ async function renderMessage(message, box) {
         minute: '2-digit'
       })
     : '';
+  if (message.sender_id === me.id && !message.deleted_at) {
+    bubble.dataset.ts = String(message.created_at ? Date.parse(message.created_at) : Date.now());
+    const tick = document.createElement('span');
+    tick.className = 'rtick';
+    time.append(tick);
+    setTick(bubble);
+  }
   if (!message.deleted_at && (message.content || message.media_path)) addShareButton(time, message, shareUrl);
   bubble.append(time);
 }
@@ -1262,6 +1271,9 @@ function subscribeToMessages() {
     roomChannel = null;
   }
   const subscribedRoom = room;
+  readsOthers = 0;
+  loadOthersRead();
+  markRoomRead();
   roomChannel = db
     .channel('messages-' + subscribedRoom)
     .on(
@@ -1279,6 +1291,7 @@ function subscribeToMessages() {
         if (box && payload.new) {
           await renderMessage(payload.new, box);
           box.scrollTop = box.scrollHeight;
+          if (payload.new.sender_id !== me?.id) markRoomRead();
         }
       }
     )
@@ -1294,6 +1307,20 @@ function subscribeToMessages() {
         if (room !== subscribedRoom || !payload.new?.deleted_at) return;
         const gone = $('messages')?.querySelector('[data-id="' + payload.new.id + '"]');
         if (gone) markBubbleDeleted(gone, { id: payload.new.id });
+      }
+    )
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'conversation_reads',
+        filter: 'conversation_id=eq.' + subscribedRoom
+      },
+      payload => {
+        if (room !== subscribedRoom || !payload.new || payload.new.user_id === me?.id) return;
+        readsOthers = Math.max(readsOthers, Date.parse(payload.new.last_read_at) || 0);
+        updateAllTicks();
       }
     )
     .subscribe();
@@ -1653,7 +1680,10 @@ async function openRoomProfile() {
   if (roomOtherId) openContactProfile(roomOtherId);
   else openGroupInfo(room, $('roomTitle')?.textContent);
 }
-$('roomAvatar')?.addEventListener('click', openRoomProfile);
+$('roomAvatar')?.addEventListener('click', () => {
+  if (roomOtherId && openStatusOf(roomOtherId)) return;
+  openRoomProfile();
+});
 document.querySelector('.room-bar .room-title')?.addEventListener('click', openRoomProfile);
 /* =====================================================
    ENVOI DE MESSAGES ET DE MÉDIAS
@@ -2051,6 +2081,7 @@ async function statusUrl(path) {
   return url;
 }
 let statusGroups = [];
+let adminIds = new Set();   // utilisateurs admin (table app_admins) : leurs statuts sont vus par tous
 let statusOrder = [];
 let statusFilter = '';
 function groupUnviewed(group) {
@@ -2088,7 +2119,11 @@ async function loadStatuses() {
         names.set(person.id, person.full_name || person.username || 'Utilisateur');
       });
     }
-    cacheSet('statuses', { data, names: [...names.entries()] });
+    try {
+      const { data: adminRows, error: adminError } = await db.from('app_admins').select('user_id');
+      if (!adminError) adminIds = new Set((adminRows || []).map(row => row.user_id));
+    } catch (error) { /* table absente : SETUP-admin.sql pas encore exécuté */ }
+    cacheSet('statuses', { data, names: [...names.entries()], admins: [...adminIds] });
   } catch (error) {
     if (!isNetworkError(error)) throw error;
     const saved = cacheGet('statuses');
@@ -2096,6 +2131,7 @@ async function loadStatuses() {
     const now = Date.now();
     data = (saved.data || []).filter(item => !item.expires_at || new Date(item.expires_at).getTime() > now);
     (saved.names || []).forEach(([id, name]) => names.set(id, name));
+    adminIds = new Set(saved.admins || []);
   }
   const byUser = new Map();
   (data || []).forEach(item => {
@@ -2105,12 +2141,35 @@ async function loadStatuses() {
   statusGroups = [...byUser.entries()].map(([userId, items]) => ({
     userId,
     items,
+    isAdmin: adminIds.has(userId),
     isMe: userId === me.id,
     name: userId === me.id
       ? 'Mon statut'
       : (names.get(userId) || 'Utilisateur')
   }));
   renderStatusStrip();
+  refreshStatusRings();
+  if (typeof stUpdateAudience === 'function') stUpdateAudience();
+  updateAdminRow();
+}
+function statusGroupFor(userId) {
+  return statusGroups.find(group => group.userId === userId && group.items.length) || null;
+}
+function applyStatusRing(el, userId) {
+  if (!el) return;
+  if (userId) el.dataset.stuser = userId; else delete el.dataset.stuser;
+  el.classList.remove('st-new', 'st-seen');
+  const group = userId && userId !== me?.id ? statusGroupFor(userId) : null;
+  if (group) el.classList.add(groupUnviewed(group) ? 'st-new' : 'st-seen');
+}
+function refreshStatusRings() {
+  document.querySelectorAll('[data-stuser]').forEach(el => applyStatusRing(el, el.dataset.stuser));
+}
+function openStatusOf(userId) {
+  const group = statusGroupFor(userId);
+  if (!group || statusOrder.indexOf(group) < 0) return false;
+  openStatusViewer(group);
+  return true;
 }
 function statusCard(group, own) {
   const card = document.createElement('div');
@@ -2165,6 +2224,13 @@ function statusCard(group, own) {
     ? (group.items.length ? 'Mon statut' : 'Ajouter un statut')
     : group.name;
   card.append(bg, ring, name);
+  if (group.isAdmin || (own && adminIds.has(me?.id))) {
+    ring.classList.add('official');
+    const badge = document.createElement('span');
+    badge.className = 'sc-badge';
+    badge.textContent = 'Admin';
+    card.append(badge);
+  }
   const open = () => {
     if (own && !group.items.length) openStatusComposer();
     else openStatusViewer(group);
@@ -2190,6 +2256,8 @@ function renderStatusStrip() {
     others = others.filter(group => group.name.toLowerCase().includes(query));
   }
   others.sort((a, b) => {
+    const official = Number(b.isAdmin) - Number(a.isAdmin);
+    if (official) return official;
     const diff = Number(groupUnviewed(b)) - Number(groupUnviewed(a));
     if (diff) return diff;
     return new Date(b.items[b.items.length - 1].created_at) -
@@ -2292,6 +2360,7 @@ function openStatusViewer(group) {
   showViewerStatus();
 }
 function closeStatusViewer() {
+  setTimeout(refreshStatusRings, 120);
   stopViewerTimer();
   viewer.paused = false;
   $('statusViewer').classList.remove('paused');
@@ -3370,6 +3439,295 @@ function renderBgSection(box) {
   }));
 }
 
+/* ---------- Diagnostic des notifications ---------- */
+async function openNotifDiag() {
+  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  const permission = ('Notification' in window) ? Notification.permission : 'indisponible';
+  let sub = null;
+  let saved = null;
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    sub = await reg?.pushManager?.getSubscription();
+    if (sub && db && me) {
+      const { data } = await db.from('push_subscriptions').select('endpoint').eq('endpoint', sub.endpoint).maybeSingle();
+      saved = Boolean(data);
+    }
+  } catch (error) { /* ignoré */ }
+  const yes = value => (value ? 'Oui ✓' : 'Non ✗');
+  optScope = null;
+  sheetOpen('Notifications : diagnostic', body => {
+    body.append(optRow('App installée sur l’écran d’accueil', yes(standalone), null));
+    body.append(optRow('Autorisation du téléphone', permission === 'granted' ? 'Oui ✓' : (permission === 'denied' ? 'Refusée ✗' : 'Pas encore'), null));
+    body.append(optRow('Abonnement push', yes(sub), null));
+    body.append(optRow('Enregistré sur le serveur', saved === null ? '—' : yes(saved), null));
+    body.append(optRow('Activer les notifications', '', async () => { await enablePush(); openNotifDiag(); }));
+    body.append(optRow('Envoyer un test (son + bannière)', '', () => {
+      messageAlert('person');
+      systemNotify('TRUE CHAT', 'Test : si vous voyez ceci, tout fonctionne.', room || '');
+      showBanner('TRUE CHAT', 'Test : bannière en haut de l’écran.', room || '');
+    }));
+    body.append(scopeNote('iPhone : iOS 16.4 minimum, app ajoutée à l’écran d’accueil depuis Safari, notifications autorisées dans Réglages > Notifications > TRUE CHAT, et mode silencieux désactivé. Android : Réglages > Applications > TRUE CHAT > Notifications : activées avec « Alerte / Son ».'));
+  });
+}
+$('setNotifTest')?.addEventListener('click', openNotifDiag);
+
+/* ---------- Page « Télécharger l'application » ---------- */
+let installPrompt = null;
+window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); installPrompt = event; });
+function isStandaloneApp() {
+  return matchMedia('(display-mode: standalone)').matches || matchMedia('(display-mode: fullscreen)').matches || navigator.standalone === true;
+}
+function hideLanding() {
+  const el = $('landing');
+  if (el) el.hidden = true;
+  document.body.style.overflow = '';
+}
+window.addEventListener('appinstalled', hideLanding);
+function showLandingIfNeeded() {
+  const el = $('landing');
+  if (!el || isStandaloneApp()) return;
+  try {
+    if (Date.now() < Number(localStorage.getItem('truechat.landingUntil') || 0)) return;
+  } catch (error) { /* ignoré */ }
+  if (/#room=/.test(location.hash)) return;
+  el.hidden = false;
+  document.body.style.overflow = 'hidden';
+}
+$('landingInstall')?.addEventListener('click', async () => {
+  if (installPrompt) {
+    installPrompt.prompt();
+    try { await installPrompt.userChoice; } catch (error) { /* ignoré */ }
+    installPrompt = null;
+    return;
+  }
+  const help = $('landingHelp');
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  help.textContent = ios
+    ? 'Sur iPhone (Safari) : touchez le bouton Partager, puis « Sur l’écran d’accueil », puis Ajouter.'
+    : 'Sur Android (Chrome) : touchez ⋮ en haut à droite, puis « Installer l’application ».';
+  help.hidden = false;
+});
+$('landingContinue')?.addEventListener('click', () => {
+  try { localStorage.setItem('truechat.landingUntil', String(Date.now() + 3 * 24 * 3600 * 1000)); } catch (error) { /* ignoré */ }
+  hideLanding();
+});
+showLandingIfNeeded();
+
+/* ---------- Administration (réservée aux admins ; contrôle fait côté serveur) ---------- */
+function updateAdminRow() {
+  const row = $('setAdmin');
+  if (row) row.style.display = (me && adminIds.has(me.id)) ? '' : 'none';
+}
+async function adminCall(name, args) {
+  const { data, error } = await db.rpc(name, args || {});
+  if (error) throw error;
+  return data;
+}
+function adminDate(iso) {
+  try { return new Date(iso).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' }); } catch (error) { return ''; }
+}
+function adminBtn(label, onClick, danger) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'adm-btn' + (danger ? ' danger' : '');
+  b.textContent = label;
+  b.addEventListener('click', onClick);
+  return b;
+}
+function adminSize(bytes) {
+  if (!bytes && bytes !== 0) return '';
+  if (bytes < 1024) return bytes + ' o';
+  if (bytes < 1048576) return Math.round(bytes / 1024) + ' Ko';
+  return (bytes / 1048576).toFixed(1) + ' Mo';
+}
+async function openAdminStorage(bucket, path) {
+  const title = 'Stockage · ' + bucket + (path ? '/' + path : '');
+  sheetOpen(title, body => body.append(scopeNote('Chargement…')));
+  let items;
+  try {
+    const { data, error } = await db.storage.from(bucket).list(path, { limit: 200, sortBy: { column: 'created_at', order: 'desc' } });
+    if (error) throw error;
+    items = data || [];
+  } catch (error) {
+    errorMessage(error);
+    return;
+  }
+  const prefix = path ? path + '/' : '';
+  const removeFiles = async names => {
+    try {
+      const { data, error } = await db.storage.from(bucket).remove(names.map(name => prefix + name));
+      if (error) throw error;
+      if (!data || !data.length) throw new Error('Suppression refusée : exécutez SETUP-NOUVEAUTES.sql dans Supabase.');
+      notify(data.length + ' fichier(s) supprimé(s).');
+      openAdminStorage(bucket, path);
+    } catch (error) { errorMessage(error); }
+  };
+  sheetOpen(title, body => {
+    body.append(adminBtn('← Retour', () => (path ? openAdminStorage(bucket, path.split('/').slice(0, -1).join('/')) : openAdminSheet())));
+    if (!items.length) body.append(scopeNote('Dossier vide.'));
+    const files = items.filter(item => item.id);
+    items.forEach(item => {
+      const card = document.createElement('div');
+      card.className = 'adm-card';
+      const btns = document.createElement('div');
+      btns.className = 'adm-btns';
+      if (!item.id) {
+        card.append(mk('b', '', '📁 ' + item.name));
+        btns.append(adminBtn('Ouvrir', () => openAdminStorage(bucket, prefix + item.name)));
+      } else {
+        card.append(mk('b', '', item.name), mk('small', '', adminSize(item.metadata?.size) + ' · ' + adminDate(item.created_at)));
+        btns.append(adminBtn('Aperçu', async () => {
+          const { data } = await db.storage.from(bucket).createSignedUrl(prefix + item.name, 300);
+          if (data?.signedUrl) window.open(data.signedUrl, '_blank', 'noopener');
+        }));
+        btns.append(adminBtn('Supprimer', () => {
+          if (confirm('Supprimer ce fichier définitivement ?')) removeFiles([item.name]);
+        }, true));
+      }
+      card.append(btns);
+      body.append(card);
+    });
+    if (files.length > 1) {
+      body.append(adminBtn('Supprimer les ' + files.length + ' fichiers de ce dossier', () => {
+        if (confirm('Supprimer ' + files.length + ' fichiers définitivement ?')) removeFiles(files.map(f => f.name));
+      }, true));
+    }
+  });
+}
+async function openAdminSheet() {
+  if (!me || !adminIds.has(me.id)) return;
+  optScope = null;
+  sheetOpen('Administration', body => body.append(scopeNote('Chargement…')));
+  let stats, users, statuses;
+  try {
+    [stats, users, statuses] = await Promise.all([
+      adminCall('admin_stats'), adminCall('admin_list_users'), adminCall('admin_list_statuses')
+    ]);
+  } catch (error) {
+    const missing = /function|schema cache|does not exist|Could not find/i.test(error.message || '');
+    sheetOpen('Administration', body => body.append(scopeNote(missing
+      ? 'Exécutez SETUP-admin-page.sql dans Supabase (SQL Editor), puis rouvrez cette page.'
+      : 'Erreur : ' + (error.message || error))));
+    return;
+  }
+  const act = async (fn, args, done) => {
+    try { await adminCall(fn, args); notify(done); loadStatuses(); openAdminSheet(); } catch (error) { errorMessage(error); }
+  };
+  sheetOpen('Administration', body => {
+    const grid = document.createElement('div');
+    grid.className = 'adm-stats';
+    [['users', 'Utilisateurs'], ['new_users_7d', 'Nouveaux (7 j)'], ['messages', 'Messages'],
+     ['conversations', 'Discussions'], ['statuses', 'Statuts actifs'], ['admins', 'Admins']].forEach(([key, label]) => {
+      const box = document.createElement('div');
+      box.className = 'adm-stat';
+      box.append(mk('b', '', String(stats?.[key] ?? 0)), mk('small', '', label));
+      grid.append(box);
+    });
+    body.append(grid);
+
+    body.append(mk('h4', 'adm-h', 'ANNONCE À TOUS (notification)'));
+    const annTitle = document.createElement('input');
+    annTitle.className = 'adm-search';
+    annTitle.placeholder = 'Titre (ex : TRUE CHAT)';
+    annTitle.setAttribute('data-notr', '');
+    const annText = document.createElement('textarea');
+    annText.className = 'adm-search';
+    annText.rows = 3;
+    annText.placeholder = 'Message à envoyer à tous les utilisateurs';
+    annText.setAttribute('data-notr', '');
+    body.append(annTitle, annText, adminBtn('Envoyer à tous', async () => {
+      const text = annText.value.trim();
+      if (!text) { notify('Écrivez un message.'); return; }
+      if (!confirm('Envoyer cette notification à TOUS les utilisateurs ?')) return;
+      try {
+        const { data, error } = await db.functions.invoke('admin-broadcast', { body: { title: annTitle.value.trim() || 'TRUE CHAT', body: text } });
+        if (error) throw error;
+        notify('Envoyé à ' + (data?.sent ?? 0) + ' appareil(s).');
+        annText.value = '';
+      } catch (error) {
+        errorMessage(new Error(/not found|404|non-2xx|Failed to send/i.test(error.message || '')
+          ? 'Fonction admin-broadcast absente ou refusée : voir le guide ADMIN-GUIDE.md.' : (error.message || error)));
+      }
+    }));
+
+    body.append(mk('h4', 'adm-h', 'STOCKAGE (photos, vidéos, fichiers)'));
+    const buckets = document.createElement('div');
+    buckets.className = 'adm-btns';
+    body.append(buckets);
+    db.storage.listBuckets().then(({ data }) => {
+      (data || []).forEach(b => buckets.append(adminBtn(b.name, () => openAdminStorage(b.name, ''))));
+      if (!(data || []).length) buckets.append(mk('small', '', 'Aucun bucket visible : exécutez SETUP-NOUVEAUTES.sql.'));
+    }).catch(() => buckets.append(mk('small', '', 'Stockage indisponible.')));
+
+    body.append(mk('h4', 'adm-h', 'UTILISATEURS (' + users.length + ')'));
+
+    const search = document.createElement('input');
+    search.className = 'adm-search';
+    search.placeholder = 'Rechercher un nom ou un email';
+    search.setAttribute('data-notr', '');
+    body.append(search);
+    const cards = [];
+    users.forEach(u => {
+      const card = document.createElement('div');
+      card.className = 'adm-card';
+      const title = mk('b', '', u.full_name || u.username || 'Sans nom');
+      if (u.is_admin) title.append(mk('span', 'adm-tag', 'ADMIN'));
+      if (u.banned) title.append(mk('span', 'adm-tag', 'BANNI'));
+      card.append(title, mk('small', '', u.email || ''));
+      card.append(mk('small', '', 'Inscrit le ' + adminDate(u.created_at) + ' · ' + u.messages + ' message(s)' +
+        (u.last_seen ? ' · vu le ' + adminDate(u.last_seen) : '')));
+      const btns = document.createElement('div');
+      btns.className = 'adm-btns';
+      if (u.id !== me.id) {
+        btns.append(adminBtn(u.is_admin ? 'Retirer admin' : 'Rendre admin', () => {
+          if (!confirm((u.is_admin ? 'Retirer le rôle admin à ' : 'Rendre admin : ') + (u.email || u.id) + ' ?')) return;
+          act('admin_set_admin', { target: u.id, make: !u.is_admin }, 'Rôle mis à jour.');
+        }));
+        if (!u.is_admin) {
+          btns.append(adminBtn(u.banned ? 'Débannir' : 'Bannir', () => {
+            if (!confirm((u.banned ? 'Débannir ' : 'Bannir (bloquer l’accès à l’app) ') + (u.email || u.id) + ' ?')) return;
+            act('admin_ban_user', { target: u.id, ban: !u.banned }, u.banned ? 'Utilisateur débanni.' : 'Utilisateur banni.');
+          }, !u.banned));
+          btns.append(adminBtn('Supprimer', () => {
+            if (!confirm('Supprimer définitivement ' + (u.email || u.id) + ' et TOUTES ses données ? Cette action est irréversible.')) return;
+            act('admin_delete_user', { target: u.id }, 'Utilisateur supprimé.');
+          }, true));
+        }
+      } else {
+        card.append(mk('small', '', 'C’est vous'));
+      }
+      if (btns.children.length) card.append(btns);
+      card.dataset.q = ((u.full_name || '') + ' ' + (u.username || '') + ' ' + (u.email || '')).toLowerCase();
+      cards.push(card);
+      body.append(card);
+    });
+    search.addEventListener('input', () => {
+      const q = search.value.trim().toLowerCase();
+      cards.forEach(card => { card.style.display = !q || card.dataset.q.includes(q) ? '' : 'none'; });
+    });
+
+    body.append(mk('h4', 'adm-h', 'STATUTS ACTIFS (' + statuses.length + ')'));
+    if (!statuses.length) body.append(scopeNote('Aucun statut actif.'));
+    statuses.forEach(st0 => {
+      const card = document.createElement('div');
+      card.className = 'adm-card';
+      card.append(mk('b', '', st0.name || 'Utilisateur'));
+      card.append(mk('small', '', (st0.type === 'text' ? (st0.content || '').slice(0, 80) : st0.type) +
+        ' · expire le ' + adminDate(st0.expires_at)));
+      const btns = document.createElement('div');
+      btns.className = 'adm-btns';
+      btns.append(adminBtn('Supprimer ce statut', () => {
+        if (!confirm('Supprimer ce statut ?')) return;
+        act('admin_delete_status', { sid: String(st0.id) }, 'Statut supprimé.');
+      }, true));
+      card.append(btns);
+      body.append(card);
+    });
+    body.append(scopeNote('Les actions sont vérifiées sur le serveur : seuls les admins peuvent les exécuter.'));
+  });
+}
+$('setAdmin')?.addEventListener('click', openAdminSheet);
+
 /* ---------- Langues (traduction de toute l'interface) ---------- */
 const LANGS = [['fr', 'Français'], ['en', 'English'], ['rn', 'Kirundi'], ['sw', 'Kiswahili'], ['es', 'Español'], ['pt', 'Português']];
 const LANG_KEY = 'truechat.lang';
@@ -3507,12 +3865,13 @@ function wallSet(k, v) {
   } catch (error) { return false; }
 }
 function wallDim() {
-  try { const v = parseFloat(localStorage.getItem(WALL_DIM_KEY)); return Number.isNaN(v) ? 0.25 : v; } catch (error) { return 0.25; }
+  try { const v = parseFloat(localStorage.getItem(WALL_DIM_KEY)); return Number.isNaN(v) ? 0 : v; } catch (error) { return 0.25; }
 }
 function applyWalls() {
   const dim = wallDim();
   const bg = $('bg');
   const home = wallGet('home');
+  document.body.classList.toggle('has-wall', !!(home || wallGet('chat')));
   if (bg) {
     bg.style.setProperty('--walldim', String(dim));
     bg.style.backgroundImage = home ? 'url("' + home + '")' : '';
@@ -3740,6 +4099,7 @@ async function saveMediaFile(url, name, mimeHint) {
   }
 }
 function addSaveButton(bubble, url, name, type) {
+  return; /* remplacé par le menu du message (appui long ou bouton ⋯) : Télécharger, Copier, Transférer, Supprimer */
   if (prefs.saveMode === 'never' || advFor(room)) return;
   const button = document.createElement('button');
   button.type = 'button';
@@ -4002,6 +4362,79 @@ async function deleteForEveryone(message, bubble) {
     errorMessage(error);
   }
 }
+/* ---------- Accusés de lecture (✓ envoyé, ✓✓ lu) ---------- */
+const PHONE_RE = /\+?\d[\d\s().-]{6,}\d/;
+let readsOthers = 0;
+let readsFeat = true;
+let readMarkAt = 0;
+function setTick(bubble) {
+  const tick = bubble.querySelector('.rtick');
+  if (!tick) return;
+  const read = Number(bubble.dataset.ts) <= readsOthers;
+  tick.textContent = read ? '✓✓' : '✓';
+  tick.classList.toggle('read', read);
+}
+function updateAllTicks() {
+  $('messages')?.querySelectorAll('.bubble.mine[data-ts]').forEach(setTick);
+}
+async function loadOthersRead() {
+  if (!db || !me || !room || !readsFeat || !navigator.onLine) return;
+  const current = room;
+  try {
+    const { data, error } = await db.from('conversation_reads')
+      .select('last_read_at').eq('conversation_id', current).neq('user_id', me.id);
+    if (error) throw error;
+    if (room !== current) return;
+    readsOthers = Math.max(0, ...(data || []).map(row => Date.parse(row.last_read_at) || 0));
+    updateAllTicks();
+  } catch (error) {
+    if (missingTable(error)) readsFeat = false;
+  }
+}
+async function markRoomRead() {
+  if (!db || !me || !room || !readsFeat || document.hidden || !navigator.onLine) return;
+  if (prefs.noReadReceipts) return;
+  const now = Date.now();
+  if (now - readMarkAt < 1500) return;
+  readMarkAt = now;
+  try {
+    const { error } = await db.from('conversation_reads').upsert(
+      { conversation_id: room, user_id: me.id, last_read_at: new Date().toISOString() },
+      { onConflict: 'conversation_id,user_id' });
+    if (error) throw error;
+  } catch (error) {
+    if (missingTable(error)) readsFeat = false;
+  }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) markRoomRead(); });
+async function copyImageToClipboard(url) {
+  try {
+    const pngPromise = (async () => {
+      const blob = await (await fetch(url)).blob();
+      if (blob.type === 'image/png') return blob;
+      const objectUrl = URL.createObjectURL(blob);
+      try {
+        const img = await new Promise((resolve, reject) => {
+          const im = new Image();
+          im.onload = () => resolve(im);
+          im.onerror = () => reject(new Error('image'));
+          im.src = objectUrl;
+        });
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        canvas.getContext('2d').drawImage(img, 0, 0);
+        return await new Promise((resolve, reject) => canvas.toBlob(b => (b ? resolve(b) : reject(new Error('png'))), 'image/png'));
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+    })();
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngPromise })]);
+    notify('Photo copiée.');
+  } catch (error) {
+    notify('Copie de la photo impossible ici. Utilisez « Télécharger » ou « Transférer ».');
+  }
+}
 function openMessageActions(message, bubble) {
   if (message.deleted_at) return;
   const adv = advFor(room);
@@ -4019,17 +4452,28 @@ function openMessageActions(message, bubble) {
           closeSheet();
         }
       ));
-      if (message.content) {
-        body.append(optRow('Copier le texte', '', async () => {
-          try {
-            await navigator.clipboard.writeText(message.content);
-            notify('Texte copié.');
-          } catch (error) {
-            notify('Copie impossible sur cet appareil.');
-          }
+      const mediaUrl = bubble._mediaUrl || null;
+      const text = message.content || '';
+      if (mediaUrl && ['image', 'video', 'voice', 'file'].includes(message.type)) {
+        body.append(optRow('Télécharger', '', () => {
           closeSheet();
+          saveMediaFile(mediaUrl, message.media_name || ('truechat.' + ((message.media_path || '').split('.').pop() || 'bin')),
+            message.type === 'video' ? 'video/mp4' : (message.type === 'image' ? 'image/jpeg' : ''));
         }));
       }
+      if (text) body.append(optRow('Copier le texte', '', () => { closeSheet(); copyToClipboard(text, 'Texte copié'); }));
+      const link = (text.match(URL_RE) || [])[0];
+      if (link) body.append(optRow('Copier le lien', '', () => { closeSheet(); copyToClipboard(link, 'Lien copié'); }));
+      const phoneMatch = text.match(PHONE_RE);
+      if (phoneMatch) {
+        body.append(optRow('Copier le numéro', '', () => {
+          closeSheet();
+          copyToClipboard(phoneMatch[0].replace(/[^\d+]/g, ''), 'Numéro copié');
+        }));
+      }
+      if (mediaUrl && message.type === 'image') body.append(optRow('Copier la photo', '', () => { closeSheet(); copyImageToClipboard(mediaUrl); }));
+      if (mediaUrl && message.type === 'video') body.append(optRow('Copier la vidéo', '', () => { closeSheet(); shareMessage(message, mediaUrl); }));
+      if (text || message.media_path) body.append(optRow('Transférer', '', () => { closeSheet(); shareMessage(message, mediaUrl); }));
     }
     body.append(optRow('Supprimer', '🗑', async () => {
       closeSheet();
@@ -4473,6 +4917,17 @@ function addShareButton(time, message, url) {
     shareMessage(message, url);
   });
   time.append(button);
+  const more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'share-btn more-btn';
+  more.setAttribute('aria-label', 'Options');
+  more.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
+  more.addEventListener('click', event => {
+    event.stopPropagation();
+    const holder = time.closest('.bubble');
+    if (holder) openMessageActions(message, holder);
+  });
+  time.append(more);
 }
 function cachePushMsg(roomId, message) {
   if (!message?.id || !roomId || !me) return;
@@ -4730,7 +5185,58 @@ function audioContext() {
 }
 ['pointerdown', 'touchstart', 'keydown'].forEach(name =>
   document.addEventListener(name, () => audioContext(), { once: true, passive: true }));
+const toneUrls = {};
+let toneEl = null;
+function toneWav(id) {
+  if (toneUrls[id]) return toneUrls[id];
+  const tone = TONES[id];
+  if (!tone || !tone.notes.length) return null;
+  const rate = 22050;
+  const end = Math.max(...tone.notes.map(([, at, dur]) => at + dur)) + 0.1;
+  const n = Math.ceil(end * rate);
+  const data = new Float32Array(n);
+  tone.notes.forEach(([freq, at, dur]) => {
+    const start = Math.floor(at * rate);
+    const len = Math.floor((dur + 0.05) * rate);
+    for (let i = 0; i < len && start + i < n; i++) {
+      const t = i / rate;
+      const env = Math.min(1, t / 0.015) * Math.exp(-4.5 * t / Math.max(dur, 0.05));
+      data[start + i] += Math.sin(2 * Math.PI * freq * t) * 0.4 * env;
+    }
+  });
+  const buffer = new ArrayBuffer(44 + n * 2);
+  const view = new DataView(buffer);
+  const text = (offset, value) => { for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i)); };
+  text(0, 'RIFF'); view.setUint32(4, 36 + n * 2, true); text(8, 'WAVE'); text(12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true); view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  text(36, 'data'); view.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, data[i])) * 32767, true);
+  toneUrls[id] = URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
+  return toneUrls[id];
+}
+function unlockToneAudio() {
+  if (toneEl) return;
+  toneEl = new Audio();
+  toneEl.setAttribute('playsinline', '');
+  toneEl.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
+  toneEl.play().then(() => toneEl.pause()).catch(() => {});
+}
+['pointerdown', 'touchend', 'keydown'].forEach(name =>
+  document.addEventListener(name, unlockToneAudio, { once: true, passive: true }));
 function playTone(id) {
+  const url = toneWav(id);
+  if (!url || !toneEl) { playToneWebAudio(id); return; }
+  try {
+    toneEl.src = url;
+    toneEl.currentTime = 0;
+    const started = toneEl.play();
+    if (started && started.catch) started.catch(() => playToneWebAudio(id));
+  } catch (error) {
+    playToneWebAudio(id);
+  }
+}
+function playToneWebAudio(id) {
   const tone = TONES[id];
   if (!tone || !tone.notes.length) return;
   const ctx = audioContext();
@@ -4971,6 +5477,7 @@ function renderChatList() {
     const avatar = mk('span', 'avatar');
     setAvatar(avatar, row.avatarUrl, row.name);
     if (row.otherId && onlineIds.has(row.otherId)) avatar.classList.add('is-online');
+    if (row.otherId) applyStatusRing(avatar, row.otherId);
     const name = mk('span', 'name', row.name + (prefs.muted[row.id] ? ' 🔕' : '') + (prefs.favorites[row.id] ? ' ♥' : ''));
     const time = mk('span', 'time', formatChatTime(row.time));
     const msg = mk('span', 'msg');
@@ -4987,7 +5494,7 @@ function renderChatList() {
     avatar.addEventListener('click', event => {
       event.stopPropagation();
       if (row.isGroup) openGroupInfo(row.id, row.name);
-      else if (row.otherId) openContactProfile(row.otherId);
+      else if (row.otherId) { if (!openStatusOf(row.otherId)) openContactProfile(row.otherId); }
       else openRoom(row.id);
     });
     attachLongPress(item, () => openChatMenu(row));
@@ -5275,6 +5782,10 @@ async function renderInfoPage() {
   const avatar = mk('span', 'avatar p-avatar');
   setAvatar(avatar, isGroup ? chatRows.find(row => row.id === convId)?.avatarUrl : person.avatar_url, title);
   const avatarUrl = isGroup ? null : person.avatar_url;
+  if (!isGroup) {
+    applyStatusRing(avatar, person.id);
+    avatar.addEventListener('click', event => { if (openStatusOf(person.id)) event.stopImmediatePropagation(); });
+  }
   if (avatarUrl) avatar.addEventListener('click', () => showPhoto(avatarUrl, title, avatar));
   const wrap = mk('div', 'pp-avatar');
   wrap.append(avatar);
@@ -5581,6 +6092,7 @@ const st = {
   cur: null, drag: null, bg: ST_BG[0], font: 0, sending: false
 };
 function stAudienceLabel() {
+  if (adminIds.has(me?.id)) return 'Statut (Tout le monde)';
   const a = prefs.stAudience;
   if (a.mode === 'except') return 'Statut (' + a.ids.length + ' exclus)';
   if (a.mode === 'only') return 'Statut (' + a.ids.length + ' choisis)';
@@ -5591,6 +6103,10 @@ function stUpdateAudience() {
 }
 async function openAudienceSheet() {
   optScope = null;
+  if (adminIds.has(me?.id)) {
+    notify('Vous êtes admin : votre statut est visible par tout le monde.');
+    return;
+  }
   let people = [];
   try {
     people = await loadKnownPeople();
