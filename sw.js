@@ -1,5 +1,5 @@
 /* TRUE CHAT — service worker : installation PWA, mode hors-ligne et notifications push */
-const CACHE = 'truechat-shell-v14';
+const CACHE = 'truechat-shell-v15';
 const CDN_CACHE = 'truechat-cdn-v1';
 const IMG_CACHE = 'truechat-img-v1';
 const SHELL = [

@@ -1259,6 +1259,7 @@ async function renderMessage(message, box) {
     const tick = document.createElement('span');
     tick.className = 'rtick';
     time.append(tick);
+    bubble.append(time);   // le tick doit être dans la bulle avant setTick
     setTick(bubble);
   }
   if (!message.deleted_at && (message.content || message.media_path)) addShareButton(time, message, shareUrl);
@@ -2141,7 +2142,6 @@ async function loadStatuses() {
   statusGroups = [...byUser.entries()].map(([userId, items]) => ({
     userId,
     items,
-    isAdmin: adminIds.has(userId),
     isMe: userId === me.id,
     name: userId === me.id
       ? 'Mon statut'
@@ -2224,13 +2224,6 @@ function statusCard(group, own) {
     ? (group.items.length ? 'Mon statut' : 'Ajouter un statut')
     : group.name;
   card.append(bg, ring, name);
-  if (group.isAdmin || (own && adminIds.has(me?.id))) {
-    ring.classList.add('official');
-    const badge = document.createElement('span');
-    badge.className = 'sc-badge';
-    badge.textContent = 'Admin';
-    card.append(badge);
-  }
   const open = () => {
     if (own && !group.items.length) openStatusComposer();
     else openStatusViewer(group);
@@ -2256,8 +2249,6 @@ function renderStatusStrip() {
     others = others.filter(group => group.name.toLowerCase().includes(query));
   }
   others.sort((a, b) => {
-    const official = Number(b.isAdmin) - Number(a.isAdmin);
-    if (official) return official;
     const diff = Number(groupUnviewed(b)) - Number(groupUnviewed(a));
     if (diff) return diff;
     return new Date(b.items[b.items.length - 1].created_at) -
@@ -3598,18 +3589,19 @@ async function openAdminSheet() {
   if (!me || !adminIds.has(me.id)) return;
   optScope = null;
   sheetOpen('Administration', body => body.append(scopeNote('Chargement…')));
-  let stats, users, statuses;
-  try {
-    [stats, users, statuses] = await Promise.all([
-      adminCall('admin_stats'), adminCall('admin_list_users'), adminCall('admin_list_statuses')
-    ]);
-  } catch (error) {
-    const missing = /function|schema cache|does not exist|Could not find/i.test(error.message || '');
-    sheetOpen('Administration', body => body.append(scopeNote(missing
-      ? 'Exécutez SETUP-admin-page.sql dans Supabase (SQL Editor), puis rouvrez cette page.'
-      : 'Erreur : ' + (error.message || error))));
+  const res = await Promise.allSettled([
+    adminCall('admin_stats'), adminCall('admin_list_users'), adminCall('admin_list_statuses')
+  ]);
+  const failed = res.find(item => item.status === 'rejected');
+  if (failed) {
+    const msg = String(failed.reason?.message || failed.reason || '');
+    const missing = /function|schema cache|does not exist|Could not find/i.test(msg);
+    sheetOpen('Administration', body => body.append(scopeNote((missing
+      ? 'Exécutez SETUP-TOUT.sql dans Supabase (SQL Editor > Run), puis rouvrez cette page.'
+      : 'Erreur : ') + '\n[' + msg + ']')));
     return;
   }
+  const [stats, users, statuses] = res.map(item => item.value);
   const act = async (fn, args, done) => {
     try { await adminCall(fn, args); notify(done); loadStatuses(); openAdminSheet(); } catch (error) { errorMessage(error); }
   };
@@ -4372,6 +4364,7 @@ function setTick(bubble) {
   if (!tick) return;
   const read = Number(bubble.dataset.ts) <= readsOthers;
   tick.textContent = read ? '✓✓' : '✓';
+  tick.setAttribute('aria-label', read ? 'Lu' : 'Envoyé');
   tick.classList.toggle('read', read);
 }
 function updateAllTicks() {
@@ -4907,16 +4900,6 @@ async function shareMessage(message, url) {
   }
 }
 function addShareButton(time, message, url) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'share-btn';
-  button.setAttribute('aria-label', 'Partager');
-  button.innerHTML = SHARE_ICON;
-  button.addEventListener('click', event => {
-    event.stopPropagation();
-    shareMessage(message, url);
-  });
-  time.append(button);
   const more = document.createElement('button');
   more.type = 'button';
   more.className = 'share-btn more-btn';
@@ -5300,17 +5283,54 @@ function stopInbox() {
   if (inboxChannel && db) db.removeChannel(inboxChannel);
   inboxChannel = null;
 }
-function showBanner(title, text, roomId) {
+function showBanner(title, text, roomId, avatarUrl) {
   const banner = $('inBanner');
   if (!banner) return;
-  banner.replaceChildren(mk('b', '', title), mk('span', '', text));
+  const av = mk('div', 'ib-av');
+  setAvatar(av, avatarUrl || '', title);
+  const info = mk('div', 'ib-info');
+  info.append(mk('b', '', title), mk('span', '', text));
+  const reply = mk('button', 'ib-reply', 'Répondre');
+  reply.type = 'button';
+  const top = mk('div', 'ib-top');
+  top.append(av, info, reply);
+  const form = mk('div', 'ib-form');
+  form.hidden = true;
+  const input = document.createElement('input');
+  input.type = 'text'; input.placeholder = 'Votre réponse…'; input.className = 'ib-input';
+  const send = mk('button', 'ib-send', 'Envoyer');
+  send.type = 'button';
+  form.append(input, send);
+  banner.replaceChildren(top, form);
   banner.hidden = false;
-  banner.onclick = () => {
+  clearTimeout(showBanner.timer);
+  showBanner.timer = setTimeout(() => { if (form.hidden) banner.hidden = true; }, 6000);
+  top.onclick = event => {
+    if (event.target === reply) return;
     banner.hidden = true;
     openRoom(roomId);
   };
-  clearTimeout(showBanner.timer);
-  showBanner.timer = setTimeout(() => { banner.hidden = true; }, 4500);
+  reply.onclick = event => {
+    event.stopPropagation();
+    clearTimeout(showBanner.timer);
+    form.hidden = false;
+    input.focus();
+  };
+  const doSend = async () => {
+    const content = input.value.trim();
+    if (!content || !db || !me) return;
+    send.disabled = true;
+    try {
+      const { error } = await db.from('messages').insert({
+        conversation_id: roomId, sender_id: me.id, content, type: 'text', ...expiryFields(roomId)
+      });
+      if (error) throw error;
+      banner.hidden = true;
+      notify('Réponse envoyée');
+    } catch (error) { errorMessage(error); } finally { send.disabled = false; }
+  };
+  send.onclick = doSend;
+  input.onkeydown = event => { if (event.key === 'Enter') doSend(); };
 }
 function onIncoming(message) {
   if (message && me) cachePushMsg(message.conversation_id, message);
@@ -5324,7 +5344,7 @@ function onIncoming(message) {
   const alertBody = advFor(message.conversation_id) ? 'Message masqué' : (previewOf(message).text || 'Nouveau message');
   messageAlert(row?.isGroup ? 'group' : 'person');
   if (document.hidden) systemNotify(alertTitle, alertBody, message.conversation_id);
-  else showBanner(alertTitle, alertBody, message.conversation_id);
+  else showBanner(alertTitle, alertBody, message.conversation_id, row?.avatarUrl || '');
 }
 // Notification système (bannière + son du téléphone) quand l'app est en arrière-plan
 async function systemNotify(title, body, roomId) {

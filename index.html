@@ -410,8 +410,9 @@ a { color: var(--green); }
 .sc-avatar.new { border-color: var(--green); }
 .sc-avatar.seen { border-color: #5a5a5a; }
 .sc-avatar.official { border-color: #ffd54a !important; box-shadow: 0 0 0 2px rgba(255, 213, 74, .35); }
-.rtick { margin-left: 6px; font-size: 12px; letter-spacing: -2px; opacity: .8; }
-.rtick.read { color: #53bdeb; opacity: 1; }
+.rtick { display: inline-block; margin-left: 6px; font-size: 13px; font-weight: 700; letter-spacing: -2px; opacity: .9; }
+.bubble img.ri, .bubble small img.ri { width: 13px !important; height: 13px !important; min-width: 0 !important; min-height: 0 !important; display: inline-block; vertical-align: -2px; }
+.rtick.read { color: #34b7f1; opacity: 1; }
 .more-btn svg { width: 16px; height: 16px; }
 .avatar.st-new { box-shadow: 0 0 0 2px #0b1226, 0 0 0 4.5px #3ddc84; }
 .avatar.st-seen { box-shadow: 0 0 0 2px #0b1226, 0 0 0 4.5px #8b93a7; }
@@ -1118,7 +1119,15 @@ input, textarea, select { font-size: max(16px, 1em) !important; }
 .bubble.pending { opacity: .75; }
 .net-banner { display: none !important; position: fixed; left: 0; right: 0; top: 0; z-index: 400; padding: calc(6px + env(safe-area-inset-top)) 12px 6px; text-align: center; font-size: 13px; background: #b45309; color: #fff; }
 .in-banner { position: fixed; left: 12px; right: 12px; top: calc(10px + env(safe-area-inset-top)); z-index: 390; display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: 16px; background: rgba(30, 40, 70, .96); color: #fff; box-shadow: 0 10px 30px rgba(0, 0, 0, .5); }
-.in-banner span { color: #cfd6e6; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.in-banner span { color: #cfd6e6; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.ib-top { display: flex; align-items: center; gap: 10px; }
+.ib-av { flex: none; width: 40px; height: 40px; border-radius: 50%; background: #3a4a7a center/cover no-repeat; display: grid; place-items: center; font-weight: 700; }
+.ib-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.ib-reply { flex: none; border: 0; border-radius: 999px; padding: 7px 12px; background: #1e8bff; color: #fff; font-weight: 600; }
+.ib-form { display: flex; gap: 8px; margin-top: 10px; }
+.ib-form[hidden] { display: none; }
+.ib-input { flex: 1; min-width: 0; border: 0; border-radius: 999px; padding: 9px 12px; background: rgba(255,255,255,.14); color: #fff; font-size: 16px; }
+.ib-send { border: 0; border-radius: 999px; padding: 8px 14px; background: #25d366; color: #04210f; font-weight: 700; }
 .opt-sub { margin: 14px 2px 0; color: #5ee9ff; font-size: 13px; text-transform: uppercase; letter-spacing: .5px; }
 /* pages plein écran : infos du contact/groupe et profil */
 .subpage { position: fixed; inset: 0; z-index: 140; overflow-y: auto; -webkit-overflow-scrolling: touch; background: transparent; padding: env(safe-area-inset-top) calc(var(--u) * 32) calc(40px + env(safe-area-inset-bottom)); }
@@ -3147,6 +3156,7 @@ async function renderMessage(message, box) {
     const tick = document.createElement('span');
     tick.className = 'rtick';
     time.append(tick);
+    bubble.append(time);   // le tick doit être dans la bulle avant setTick
     setTick(bubble);
   }
   if (!message.deleted_at && (message.content || message.media_path)) addShareButton(time, message, shareUrl);
@@ -4029,7 +4039,6 @@ async function loadStatuses() {
   statusGroups = [...byUser.entries()].map(([userId, items]) => ({
     userId,
     items,
-    isAdmin: adminIds.has(userId),
     isMe: userId === me.id,
     name: userId === me.id
       ? 'Mon statut'
@@ -4112,13 +4121,6 @@ function statusCard(group, own) {
     ? (group.items.length ? 'Mon statut' : 'Ajouter un statut')
     : group.name;
   card.append(bg, ring, name);
-  if (group.isAdmin || (own && adminIds.has(me?.id))) {
-    ring.classList.add('official');
-    const badge = document.createElement('span');
-    badge.className = 'sc-badge';
-    badge.textContent = 'Admin';
-    card.append(badge);
-  }
   const open = () => {
     if (own && !group.items.length) openStatusComposer();
     else openStatusViewer(group);
@@ -4144,8 +4146,6 @@ function renderStatusStrip() {
     others = others.filter(group => group.name.toLowerCase().includes(query));
   }
   others.sort((a, b) => {
-    const official = Number(b.isAdmin) - Number(a.isAdmin);
-    if (official) return official;
     const diff = Number(groupUnviewed(b)) - Number(groupUnviewed(a));
     if (diff) return diff;
     return new Date(b.items[b.items.length - 1].created_at) -
@@ -5486,18 +5486,19 @@ async function openAdminSheet() {
   if (!me || !adminIds.has(me.id)) return;
   optScope = null;
   sheetOpen('Administration', body => body.append(scopeNote('Chargement…')));
-  let stats, users, statuses;
-  try {
-    [stats, users, statuses] = await Promise.all([
-      adminCall('admin_stats'), adminCall('admin_list_users'), adminCall('admin_list_statuses')
-    ]);
-  } catch (error) {
-    const missing = /function|schema cache|does not exist|Could not find/i.test(error.message || '');
-    sheetOpen('Administration', body => body.append(scopeNote(missing
-      ? 'Exécutez SETUP-admin-page.sql dans Supabase (SQL Editor), puis rouvrez cette page.'
-      : 'Erreur : ' + (error.message || error))));
+  const res = await Promise.allSettled([
+    adminCall('admin_stats'), adminCall('admin_list_users'), adminCall('admin_list_statuses')
+  ]);
+  const failed = res.find(item => item.status === 'rejected');
+  if (failed) {
+    const msg = String(failed.reason?.message || failed.reason || '');
+    const missing = /function|schema cache|does not exist|Could not find/i.test(msg);
+    sheetOpen('Administration', body => body.append(scopeNote((missing
+      ? 'Exécutez SETUP-TOUT.sql dans Supabase (SQL Editor > Run), puis rouvrez cette page.'
+      : 'Erreur : ') + '\n[' + msg + ']')));
     return;
   }
+  const [stats, users, statuses] = res.map(item => item.value);
   const act = async (fn, args, done) => {
     try { await adminCall(fn, args); notify(done); loadStatuses(); openAdminSheet(); } catch (error) { errorMessage(error); }
   };
@@ -6260,6 +6261,7 @@ function setTick(bubble) {
   if (!tick) return;
   const read = Number(bubble.dataset.ts) <= readsOthers;
   tick.textContent = read ? '✓✓' : '✓';
+  tick.setAttribute('aria-label', read ? 'Lu' : 'Envoyé');
   tick.classList.toggle('read', read);
 }
 function updateAllTicks() {
@@ -6795,16 +6797,6 @@ async function shareMessage(message, url) {
   }
 }
 function addShareButton(time, message, url) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'share-btn';
-  button.setAttribute('aria-label', 'Partager');
-  button.innerHTML = SHARE_ICON;
-  button.addEventListener('click', event => {
-    event.stopPropagation();
-    shareMessage(message, url);
-  });
-  time.append(button);
   const more = document.createElement('button');
   more.type = 'button';
   more.className = 'share-btn more-btn';
@@ -7188,17 +7180,54 @@ function stopInbox() {
   if (inboxChannel && db) db.removeChannel(inboxChannel);
   inboxChannel = null;
 }
-function showBanner(title, text, roomId) {
+function showBanner(title, text, roomId, avatarUrl) {
   const banner = $('inBanner');
   if (!banner) return;
-  banner.replaceChildren(mk('b', '', title), mk('span', '', text));
+  const av = mk('div', 'ib-av');
+  setAvatar(av, avatarUrl || '', title);
+  const info = mk('div', 'ib-info');
+  info.append(mk('b', '', title), mk('span', '', text));
+  const reply = mk('button', 'ib-reply', 'Répondre');
+  reply.type = 'button';
+  const top = mk('div', 'ib-top');
+  top.append(av, info, reply);
+  const form = mk('div', 'ib-form');
+  form.hidden = true;
+  const input = document.createElement('input');
+  input.type = 'text'; input.placeholder = 'Votre réponse…'; input.className = 'ib-input';
+  const send = mk('button', 'ib-send', 'Envoyer');
+  send.type = 'button';
+  form.append(input, send);
+  banner.replaceChildren(top, form);
   banner.hidden = false;
-  banner.onclick = () => {
+  clearTimeout(showBanner.timer);
+  showBanner.timer = setTimeout(() => { if (form.hidden) banner.hidden = true; }, 6000);
+  top.onclick = event => {
+    if (event.target === reply) return;
     banner.hidden = true;
     openRoom(roomId);
   };
-  clearTimeout(showBanner.timer);
-  showBanner.timer = setTimeout(() => { banner.hidden = true; }, 4500);
+  reply.onclick = event => {
+    event.stopPropagation();
+    clearTimeout(showBanner.timer);
+    form.hidden = false;
+    input.focus();
+  };
+  const doSend = async () => {
+    const content = input.value.trim();
+    if (!content || !db || !me) return;
+    send.disabled = true;
+    try {
+      const { error } = await db.from('messages').insert({
+        conversation_id: roomId, sender_id: me.id, content, type: 'text', ...expiryFields(roomId)
+      });
+      if (error) throw error;
+      banner.hidden = true;
+      notify('Réponse envoyée');
+    } catch (error) { errorMessage(error); } finally { send.disabled = false; }
+  };
+  send.onclick = doSend;
+  input.onkeydown = event => { if (event.key === 'Enter') doSend(); };
 }
 function onIncoming(message) {
   if (message && me) cachePushMsg(message.conversation_id, message);
@@ -7212,7 +7241,7 @@ function onIncoming(message) {
   const alertBody = advFor(message.conversation_id) ? 'Message masqué' : (previewOf(message).text || 'Nouveau message');
   messageAlert(row?.isGroup ? 'group' : 'person');
   if (document.hidden) systemNotify(alertTitle, alertBody, message.conversation_id);
-  else showBanner(alertTitle, alertBody, message.conversation_id);
+  else showBanner(alertTitle, alertBody, message.conversation_id, row?.avatarUrl || '');
 }
 // Notification système (bannière + son du téléphone) quand l'app est en arrière-plan
 async function systemNotify(title, body, roomId) {
