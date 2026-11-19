@@ -1133,29 +1133,35 @@ input, textarea, select { font-size: max(16px, 1em) !important; }
 .mc-send { flex: none; width: 52px; height: 52px; border: 0; border-radius: 50%; background: #25d366; color: #04210f; font-size: 22px; font-weight: 800; }
 #photoView img { touch-action: none; }
 
-/* ---------- appels ---------- */
+/* ---------- appels (verre / miroir) ---------- */
 .rb-call { flex: none; width: 40px; height: 40px; display: grid; place-items: center; background: none; border: 0; color: inherit; }
 .rb-call svg { width: 22px; height: 22px; }
-.cv { position: fixed; inset: 0; z-index: 900; display: flex; flex-direction: column; align-items: center; justify-content: space-between; background: radial-gradient(circle at 50% 30%, #2a3a78, #0a0f24 70%); color: #fff; padding: calc(60px + env(safe-area-inset-top)) 20px calc(40px + env(safe-area-inset-bottom)); }
+.cv { position: fixed; inset: 0; z-index: 900; display: flex; flex-direction: column; color: #fff; overflow: hidden; background: #070b1a; padding: calc(18px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); }
 .cv[hidden] { display: none; }
-.cv-remote { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; opacity: 0; }
+.cv::before { content: ""; position: absolute; inset: -40px; z-index: 0; background: var(--cv-bg, none) center / cover no-repeat, radial-gradient(circle at 50% 30%, #2a3a78, #0a0f24 70%); filter: blur(34px) brightness(.55) saturate(1.3); transform: scale(1.1); }
+.cv-remote { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; object-fit: cover; background: #000; opacity: 0; pointer-events: none; }
 .cv.video.connected .cv-remote { opacity: 1; }
-.cv-local { position: absolute; right: 14px; top: calc(14px + env(safe-area-inset-top)); width: 96px; height: 140px; object-fit: cover; border-radius: 14px; border: 2px solid rgba(255,255,255,.5); z-index: 2; transform: scaleX(-1); background: #000; }
-.cv-info { position: relative; z-index: 2; text-align: center; }
-.cv.video.connected .cv-info { position: absolute; left: 0; right: 0; top: calc(16px + env(safe-area-inset-top)); text-shadow: 0 2px 8px rgba(0,0,0,.7); }
+.cv-local { position: absolute; right: 14px; top: calc(70px + env(safe-area-inset-top)); width: 100px; height: 146px; object-fit: cover; border-radius: 16px; border: 1px solid rgba(255,255,255,.45); z-index: 3; transform: scaleX(-1); background: #000; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+.cv-top { position: relative; z-index: 3; text-align: center; text-shadow: 0 2px 10px rgba(0,0,0,.6); }
+.cv-top h2 { margin: 0; font-size: 24px; font-weight: 800; }
+.cv-top p { margin: 4px 0 0; opacity: .8; font-size: 15px; }
+.cv-mid { position: relative; z-index: 2; flex: 1; display: grid; place-items: center; }
 .cv.video.connected .cv-av { display: none; }
-.cv-av { width: 120px; height: 120px; border-radius: 50%; margin: 0 auto 16px; display: grid; place-items: center; font-size: 44px; font-weight: 700; background: #3a4a7a center/cover no-repeat; box-shadow: 0 0 0 8px rgba(255,255,255,.08); }
-.cv-info h2 { margin: 0; font-size: 26px; }
-.cv-info p { margin: 6px 0 0; opacity: .8; font-size: 16px; }
-.cv-bar { position: relative; z-index: 3; display: flex; gap: 28px; justify-content: center; }
-.cv-bar[hidden] { display: none; }
-.cv-b { width: 66px; height: 66px; border-radius: 50%; border: 0; display: grid; place-items: center; color: #fff; background: rgba(255,255,255,.18); }
+.cv-av { width: min(62vw, 280px); height: min(62vw, 280px); border-radius: 50%; display: grid; place-items: center; font-size: 80px; font-weight: 800; background: #3a4a7a center / cover no-repeat; border: 2px solid rgba(255,255,255,.35); box-shadow: 0 20px 60px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.4); }
+.cv-dock { position: relative; z-index: 3; }
+.cv-debug { text-align: center; font-size: 11px; opacity: .55; margin-bottom: 8px; min-height: 14px; }
+.cv-panel { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px 6px; padding: 20px 12px; border-radius: 30px; background: linear-gradient(155deg, rgba(255,255,255,.26), rgba(255,255,255,.07) 42%, rgba(255,255,255,.13)), rgba(14,22,52,.45); border: 1px solid rgba(255,255,255,.3); -webkit-backdrop-filter: blur(30px) saturate(180%); backdrop-filter: blur(30px) saturate(180%); box-shadow: inset 0 1px 0 rgba(255,255,255,.45), 0 20px 50px rgba(0,0,0,.45); }
+.cv-panel[hidden] { display: none; }
+.cv-panel.in { grid-template-columns: repeat(2, 1fr); }
+.cv-cell { display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 13px; text-align: center; }
+.cv-cell:has(button[hidden]) { display: none; }
+.cv-b { width: 64px; height: 64px; border-radius: 50%; border: 1px solid rgba(255,255,255,.25); display: grid; place-items: center; color: #fff; background: rgba(255,255,255,.16); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); box-shadow: inset 0 1px 0 rgba(255,255,255,.35); }
 .cv-b svg { width: 28px; height: 28px; }
-.cv-b.red { background: #e5334b; }
+.cv-b.red { background: #e5334b; border-color: transparent; }
 .cv-b.red svg { transform: rotate(135deg); }
-.cv-b.green { background: #25d366; animation: cvPulse 1.2s ease-in-out infinite; }
-.cv-b.off { background: #fff; color: #222; opacity: .85; }
-@keyframes cvPulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.12); } }
+.cv-b.green { background: #25d366; border-color: transparent; animation: cvPulse 1.2s ease-in-out infinite; }
+.cv-b.off, .cv-b.on { background: #fff; color: #222; }
+@keyframes cvPulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.1); } }
 .in-banner { position: fixed; left: 12px; right: 12px; top: calc(10px + env(safe-area-inset-top)); z-index: 390; display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: 16px; background: rgba(30, 40, 70, .96); color: #fff; box-shadow: 0 10px 30px rgba(0, 0, 0, .5); }
 .in-banner span { color: #cfd6e6; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .ib-top { display: flex; align-items: center; gap: 10px; }
@@ -1723,15 +1729,21 @@ html[data-look] .bubble.mine { background-image: linear-gradient(165deg, rgba(25
   <div id="callView" class="cv" hidden>
     <video id="cvRemote" class="cv-remote" autoplay playsinline></video>
     <video id="cvLocal" class="cv-local" autoplay playsinline muted hidden></video>
-    <div class="cv-info"><div id="cvAv" class="cv-av"></div><h2 id="cvName" data-notr></h2><p id="cvStatus"></p></div>
-    <div id="cvBarIn" class="cv-bar" hidden>
-      <button id="cvDecline" class="cv-b red" type="button" aria-label="Refuser"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.6 3.6a1 1 0 0 1-.25 1L6.6 10.8Z"/></svg></button>
-      <button id="cvAccept" class="cv-b green" type="button" aria-label="Répondre"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.6 3.6a1 1 0 0 1-.25 1L6.6 10.8Z"/></svg></button>
-    </div>
-    <div id="cvBarCall" class="cv-bar" hidden>
-      <button id="cvMute" class="cv-b" type="button" aria-label="Micro"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11h-2Z"/></svg></button>
-      <button id="cvVideoBtn" class="cv-b" type="button" aria-label="Caméra" hidden><svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4Z"/></svg></button>
-      <button id="cvHang" class="cv-b red" type="button" aria-label="Raccrocher"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.6 3.6a1 1 0 0 1-.25 1L6.6 10.8Z"/></svg></button>
+    <div class="cv-top"><h2 id="cvName" data-notr></h2><p id="cvStatus"></p></div>
+    <div class="cv-mid"><div id="cvAv" class="cv-av"></div></div>
+    <div class="cv-dock">
+      <div id="cvDebug" class="cv-debug" data-notr></div>
+      <div id="cvBarIn" class="cv-panel in" hidden>
+      <div class="cv-cell"><button id="cvDecline" class="cv-b red" type="button" aria-label="Refuser"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.6 3.6a1 1 0 0 1-.25 1L6.6 10.8Z"/></svg></button><span>Refuser</span></div>
+      <div class="cv-cell"><button id="cvAccept" class="cv-b green" type="button" aria-label="Répondre"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.6 3.6a1 1 0 0 1-.25 1L6.6 10.8Z"/></svg></button><span>Répondre</span></div>
+      </div>
+      <div id="cvBarCall" class="cv-panel" hidden>
+      <div class="cv-cell"><button id="cvSpk" class="cv-b " type="button" aria-label="Haut-parleur" hidden><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 10v4h4l5 4V6L7 10H3Zm13.5 2a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4Zm-2.5-8.8v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6Z"/></svg></button><span>Haut-parleur</span></div>
+      <div class="cv-cell"><button id="cvMute" class="cv-b " type="button" aria-label="Silence"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11h-2Z"/></svg></button><span>Silence</span></div>
+      <div class="cv-cell"><button id="cvVideoBtn" class="cv-b " type="button" aria-label="Caméra" hidden><svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4Z"/></svg></button><span>Caméra</span></div>
+      <div class="cv-cell"><button id="cvFlip" class="cv-b " type="button" aria-label="Retourner" hidden><svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 4h-3.2L15 2H9L7.2 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2Zm-8 13a4 4 0 0 1-3.5-2H11l-2.5-2.5L6 15a6 6 0 0 1 9.700-4.300l-1.300 1.300A4 4 0 1 0 12 17Z"/></svg></button><span>Retourner</span></div>
+      <div class="cv-cell"><button id="cvHang" class="cv-b red" type="button" aria-label="Terminer"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.6 3.6a1 1 0 0 1-.25 1L6.6 10.8Z"/></svg></button><span>Terminer</span></div>
+      </div>
     </div>
   </div>
 
@@ -6090,7 +6102,7 @@ function openAboutSheet() {
     });
     body.append(list);
     body.append(scopeNote('Pour une application, une affiche ou un site : contactez-moi.'));
-    body.append(scopeNote('Version de l’application : v18 (19/11/2026)'));
+    body.append(scopeNote('Version de l’application : v19 (20/11/2026)'));
     body.append(optRow('Appeler ' + ABOUT_PHONE, '›', () => { location.href = 'tel:' + ABOUT_TEL; }));
     body.append(optRow('WhatsApp ' + ABOUT_PHONE, '›', () => {
       window.open('https://wa.me/' + ABOUT_TEL.replace('+', ''), '_blank', 'noopener');
@@ -7370,10 +7382,25 @@ function openSoundsSheet() {
 /* =====================================================
    APPELS VOIX / VIDÉO (WebRTC gratuit, signalisation via Supabase)
 ===================================================== */
-const ICE_SERVERS = window.TRUE_CHAT_CONFIG?.iceServers || [
-  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+const DEFAULT_ICE = window.TRUE_CHAT_CONFIG?.iceServers || [
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
   { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turns:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' }
 ];
+let iceServers = DEFAULT_ICE;
+let iceLoadedAt = 0;
+// Serveurs TURN fiables : fournis par la fonction Edge « turn-credentials » (Cloudflare ou Metered), sinon valeurs par défaut
+async function loadIce() {
+  if (window.TRUE_CHAT_CONFIG?.iceServers || !db) return;
+  if (Date.now() - iceLoadedAt < 3600 * 1000) return;
+  try {
+    const result = await Promise.race([
+      db.functions.invoke('turn-credentials'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000))
+    ]);
+    const list = result?.data?.iceServers;
+    if (Array.isArray(list) && list.length) { iceServers = list; iceLoadedAt = Date.now(); }
+  } catch (error) { /* on garde les serveurs par défaut */ }
+}
 const RINGS = {
   classique: { name: 'Classique', total: 3, notes: [[880, 0, 0.18], [1100, 0.2, 0.18], [880, 0.5, 0.18], [1100, 0.7, 0.18]] },
   melodie: { name: 'Mélodie', total: 3, notes: [[523, 0, 0.25], [659, 0.25, 0.25], [784, 0.5, 0.25], [1047, 0.75, 0.5], [784, 1.4, 0.2], [659, 1.6, 0.2], [523, 1.8, 0.6]] },
@@ -7450,6 +7477,12 @@ function callUi(state) {
   $('cvBarCall').hidden = state === 'incoming';
   view.classList.toggle('video', Boolean(call?.media === 'video' || incomingRow?.media === 'video'));
 }
+function callSetPeer(info) {
+  $('cvName').textContent = info.name;
+  setAvatar($('cvAv'), info.avatar, info.name);
+  $('callView')?.style.setProperty('--cv-bg', info.avatar ? 'url("' + String(info.avatar).replace(/"/g, '%22') + '")' : 'none');
+  const dbg = $('cvDebug'); if (dbg) dbg.textContent = '';
+}
 function callStatus(text) { const el = $('cvStatus'); if (el) el.textContent = text; }
 async function callPeerInfo(id) {
   const row = chatRows.find(item => item.otherId === id);
@@ -7468,23 +7501,43 @@ async function callSignal(kind, payload, to) {
   });
   if (error) throw error;
 }
+function callDebug(pc, extra) {
+  const el = $('cvDebug');
+  if (!el) return;
+  const c = pc?._cand || { host: 0, srflx: 0, relay: 0 };
+  el.textContent = 'réseau : ' + (pc?.iceConnectionState || '-') + ' · host ' + c.host + ' · stun ' + c.srflx + ' · turn ' + c.relay + (extra ? ' · ' + extra : '');
+}
 function makePc() {
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const pc = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 2 });
+  pc._cand = { host: 0, srflx: 0, relay: 0 };
   pc.onicecandidate = event => {
-    if (event.candidate) callSignal('ice', event.candidate.toJSON()).catch(() => {});
+    if (event.candidate) {
+      const m = / typ (host|srflx|relay|prflx)/.exec(event.candidate.candidate || '');
+      if (m && pc._cand[m[1]] !== undefined) pc._cand[m[1]]++;
+      callDebug(pc);
+      callSignal('ice', event.candidate.toJSON()).catch(() => {});
+    }
   };
   pc.ontrack = event => {
     const remote = $('cvRemote');
-    if (remote && event.streams[0]) { remote.srcObject = event.streams[0]; remote.play?.().catch(() => {}); }
-  };
-  pc.onconnectionstatechange = () => {
-    if (!call || call.pc !== pc) return;
-    if (pc.connectionState === 'connected') callConnected();
-    else if (pc.connectionState === 'failed') endCall('Connexion perdue', true);
-    else if (pc.connectionState === 'disconnected') {
-      setTimeout(() => { if (call && call.pc === pc && pc.connectionState === 'disconnected') endCall('Connexion perdue', true); }, 8000);
+    if (remote && event.streams[0]) {
+      remote.srcObject = event.streams[0];
+      remote.muted = false;
+      remote.play?.().catch(() => { callStatus('Touchez l’écran pour activer le son'); });
     }
   };
+  const check = () => {
+    if (!call || call.pc !== pc) return;
+    callDebug(pc);
+    const st = pc.connectionState, ice = pc.iceConnectionState;
+    if (st === 'connected' || ice === 'connected' || ice === 'completed') callConnected();
+    else if (st === 'failed' || ice === 'failed') endCall('Connexion impossible : le réseau bloque l’appel (serveur TURN requis)', true);
+    else if (st === 'disconnected' || ice === 'disconnected') {
+      setTimeout(() => { if (call && call.pc === pc && (pc.connectionState === 'disconnected' || pc.iceConnectionState === 'disconnected')) endCall('Connexion perdue', true); }, 8000);
+    }
+  };
+  pc.onconnectionstatechange = check;
+  pc.oniceconnectionstatechange = check;
   return pc;
 }
 async function getMedia(media) {
@@ -7499,6 +7552,8 @@ function attachLocal(stream, media) {
   const local = $('cvLocal');
   if (local) { local.srcObject = stream; local.hidden = media !== 'video'; }
   $('cvVideoBtn').hidden = media !== 'video';
+  $('cvFlip').hidden = media !== 'video';
+  $('cvSpk').hidden = !$('cvRemote')?.setSinkId;
 }
 async function startCall(media) {
   if (!me || !db || !room) return;
@@ -7508,9 +7563,10 @@ async function startCall(media) {
   const peerId = roomOtherId;
   try {
     const stream = await getMedia(media);
+    await loadIce();
     const info = await callPeerInfo(peerId);
     call = { id: callId(), convId: room, peerId, media, role: 'caller', pc: null, stream, info, connected: false };
-    $('cvName').textContent = info.name; setAvatar($('cvAv'), info.avatar, info.name);
+    callSetPeer(info);
     attachLocal(stream, media);
     callUi('calling'); callStatus('Appel en cours…');
     startRing('back');
@@ -7520,7 +7576,7 @@ async function startCall(media) {
     await pc.setLocalDescription(offer);
     await callSignal('offer', { sdp: pc.localDescription.toJSON() });
     keepAwake();
-    callTimer = setTimeout(() => { if (call && !call.connected) endCall('Pas de réponse', true); }, 45000);
+    callTimer = setTimeout(() => { if (call && !call.connected) endCall(call.pc?.remoteDescription ? 'Connexion impossible (réseau). Un serveur TURN est nécessaire.' : 'Pas de réponse', true); }, 45000);
   } catch (error) {
     errorMessage(error);
     endCall('', false);
@@ -7532,6 +7588,7 @@ async function acceptCall() {
   stopRing();
   try {
     const stream = await getMedia(row.media === 'video' ? 'video' : 'audio');
+    await loadIce();
     const info = await callPeerInfo(row.from_id);
     call = { id: row.call_id, convId: row.conversation_id, peerId: row.from_id, media: row.media === 'video' ? 'video' : 'audio', role: 'callee', pc: null, stream, info, connected: false };
     incomingRow = null;
@@ -7546,7 +7603,7 @@ async function acceptCall() {
     await pc.setLocalDescription(answer);
     await callSignal('answer', { sdp: pc.localDescription.toJSON() });
     keepAwake();
-    callTimer = setTimeout(() => { if (call && !call.connected) endCall('Connexion impossible', true); }, 30000);
+    callTimer = setTimeout(() => { if (call && !call.connected) endCall('Connexion impossible (réseau). Un serveur TURN est nécessaire.', true); }, 30000);
   } catch (error) {
     errorMessage(error);
     if (incomingRow) { await callSignal('reject').catch(() => {}); }
@@ -7613,7 +7670,7 @@ async function handleSignal(row) {
     }
     incomingRow = row;
     const info = await callPeerInfo(row.from_id);
-    $('cvName').textContent = info.name; setAvatar($('cvAv'), info.avatar, info.name);
+    callSetPeer(info);
     $('cvLocal').hidden = true;
     callUi('incoming');
     callStatus(row.media === 'video' ? 'Appel vidéo entrant' : 'Appel vocal entrant');
@@ -7666,6 +7723,7 @@ function startCallChannel() {
       payload => handleSignal(payload.new).catch(() => {}))
     .subscribe();
   checkPendingCalls();
+  loadIce();
 }
 function stopCallChannel() {
   if (callChannel && db) db.removeChannel(callChannel);
@@ -7683,6 +7741,33 @@ $('cvMute')?.addEventListener('click', () => {
   track.enabled = !track.enabled;
   $('cvMute').classList.toggle('off', !track.enabled);
 });
+$('cvFlip')?.addEventListener('click', async () => {
+  if (!call || call.media !== 'video') return;
+  try {
+    call.facing = call.facing === 'environment' ? 'user' : 'environment';
+    const fresh = await navigator.mediaDevices.getUserMedia({ video: { facingMode: call.facing } });
+    const track = fresh.getVideoTracks()[0];
+    const sender = call.pc.getSenders().find(item => item.track && item.track.kind === 'video');
+    if (sender) await sender.replaceTrack(track);
+    call.stream.getVideoTracks().forEach(old => { old.stop(); call.stream.removeTrack(old); });
+    call.stream.addTrack(track);
+    $('cvLocal').srcObject = call.stream;
+    $('cvLocal').style.transform = call.facing === 'user' ? 'scaleX(-1)' : 'none';
+  } catch (error) { errorMessage(error); }
+});
+$('cvSpk')?.addEventListener('click', async () => {
+  const remote = $('cvRemote');
+  if (!remote?.setSinkId) return;
+  try {
+    call.speaker = !call.speaker;
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const out = devices.filter(d => d.kind === 'audiooutput');
+    const pick = call.speaker ? (out.find(d => /speaker|haut/i.test(d.label)) || out[0]) : (out.find(d => /ear|écouteur|handset/i.test(d.label)) || out[0]);
+    if (pick) await remote.setSinkId(pick.deviceId);
+    $('cvSpk').classList.toggle('on', Boolean(call.speaker));
+  } catch (error) { /* non pris en charge */ }
+});
+$('callView')?.addEventListener('click', () => { const remote = $('cvRemote'); if (remote && remote.paused && remote.srcObject) remote.play().catch(() => {}); });
 $('cvVideoBtn')?.addEventListener('click', () => {
   const track = call?.stream?.getVideoTracks()[0];
   if (!track) return;

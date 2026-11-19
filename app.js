@@ -4138,7 +4138,7 @@ function openAboutSheet() {
     });
     body.append(list);
     body.append(scopeNote('Pour une application, une affiche ou un site : contactez-moi.'));
-    body.append(scopeNote('Version de l’application : v18 (19/11/2026)'));
+    body.append(scopeNote('Version de l’application : v19 (20/11/2026)'));
     body.append(optRow('Appeler ' + ABOUT_PHONE, '›', () => { location.href = 'tel:' + ABOUT_TEL; }));
     body.append(optRow('WhatsApp ' + ABOUT_PHONE, '›', () => {
       window.open('https://wa.me/' + ABOUT_TEL.replace('+', ''), '_blank', 'noopener');
@@ -5418,10 +5418,25 @@ function openSoundsSheet() {
 /* =====================================================
    APPELS VOIX / VIDÉO (WebRTC gratuit, signalisation via Supabase)
 ===================================================== */
-const ICE_SERVERS = window.TRUE_CHAT_CONFIG?.iceServers || [
-  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+const DEFAULT_ICE = window.TRUE_CHAT_CONFIG?.iceServers || [
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
   { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turns:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' }
 ];
+let iceServers = DEFAULT_ICE;
+let iceLoadedAt = 0;
+// Serveurs TURN fiables : fournis par la fonction Edge « turn-credentials » (Cloudflare ou Metered), sinon valeurs par défaut
+async function loadIce() {
+  if (window.TRUE_CHAT_CONFIG?.iceServers || !db) return;
+  if (Date.now() - iceLoadedAt < 3600 * 1000) return;
+  try {
+    const result = await Promise.race([
+      db.functions.invoke('turn-credentials'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000))
+    ]);
+    const list = result?.data?.iceServers;
+    if (Array.isArray(list) && list.length) { iceServers = list; iceLoadedAt = Date.now(); }
+  } catch (error) { /* on garde les serveurs par défaut */ }
+}
 const RINGS = {
   classique: { name: 'Classique', total: 3, notes: [[880, 0, 0.18], [1100, 0.2, 0.18], [880, 0.5, 0.18], [1100, 0.7, 0.18]] },
   melodie: { name: 'Mélodie', total: 3, notes: [[523, 0, 0.25], [659, 0.25, 0.25], [784, 0.5, 0.25], [1047, 0.75, 0.5], [784, 1.4, 0.2], [659, 1.6, 0.2], [523, 1.8, 0.6]] },
@@ -5498,6 +5513,12 @@ function callUi(state) {
   $('cvBarCall').hidden = state === 'incoming';
   view.classList.toggle('video', Boolean(call?.media === 'video' || incomingRow?.media === 'video'));
 }
+function callSetPeer(info) {
+  $('cvName').textContent = info.name;
+  setAvatar($('cvAv'), info.avatar, info.name);
+  $('callView')?.style.setProperty('--cv-bg', info.avatar ? 'url("' + String(info.avatar).replace(/"/g, '%22') + '")' : 'none');
+  const dbg = $('cvDebug'); if (dbg) dbg.textContent = '';
+}
 function callStatus(text) { const el = $('cvStatus'); if (el) el.textContent = text; }
 async function callPeerInfo(id) {
   const row = chatRows.find(item => item.otherId === id);
@@ -5516,23 +5537,43 @@ async function callSignal(kind, payload, to) {
   });
   if (error) throw error;
 }
+function callDebug(pc, extra) {
+  const el = $('cvDebug');
+  if (!el) return;
+  const c = pc?._cand || { host: 0, srflx: 0, relay: 0 };
+  el.textContent = 'réseau : ' + (pc?.iceConnectionState || '-') + ' · host ' + c.host + ' · stun ' + c.srflx + ' · turn ' + c.relay + (extra ? ' · ' + extra : '');
+}
 function makePc() {
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const pc = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 2 });
+  pc._cand = { host: 0, srflx: 0, relay: 0 };
   pc.onicecandidate = event => {
-    if (event.candidate) callSignal('ice', event.candidate.toJSON()).catch(() => {});
+    if (event.candidate) {
+      const m = / typ (host|srflx|relay|prflx)/.exec(event.candidate.candidate || '');
+      if (m && pc._cand[m[1]] !== undefined) pc._cand[m[1]]++;
+      callDebug(pc);
+      callSignal('ice', event.candidate.toJSON()).catch(() => {});
+    }
   };
   pc.ontrack = event => {
     const remote = $('cvRemote');
-    if (remote && event.streams[0]) { remote.srcObject = event.streams[0]; remote.play?.().catch(() => {}); }
-  };
-  pc.onconnectionstatechange = () => {
-    if (!call || call.pc !== pc) return;
-    if (pc.connectionState === 'connected') callConnected();
-    else if (pc.connectionState === 'failed') endCall('Connexion perdue', true);
-    else if (pc.connectionState === 'disconnected') {
-      setTimeout(() => { if (call && call.pc === pc && pc.connectionState === 'disconnected') endCall('Connexion perdue', true); }, 8000);
+    if (remote && event.streams[0]) {
+      remote.srcObject = event.streams[0];
+      remote.muted = false;
+      remote.play?.().catch(() => { callStatus('Touchez l’écran pour activer le son'); });
     }
   };
+  const check = () => {
+    if (!call || call.pc !== pc) return;
+    callDebug(pc);
+    const st = pc.connectionState, ice = pc.iceConnectionState;
+    if (st === 'connected' || ice === 'connected' || ice === 'completed') callConnected();
+    else if (st === 'failed' || ice === 'failed') endCall('Connexion impossible : le réseau bloque l’appel (serveur TURN requis)', true);
+    else if (st === 'disconnected' || ice === 'disconnected') {
+      setTimeout(() => { if (call && call.pc === pc && (pc.connectionState === 'disconnected' || pc.iceConnectionState === 'disconnected')) endCall('Connexion perdue', true); }, 8000);
+    }
+  };
+  pc.onconnectionstatechange = check;
+  pc.oniceconnectionstatechange = check;
   return pc;
 }
 async function getMedia(media) {
@@ -5547,6 +5588,8 @@ function attachLocal(stream, media) {
   const local = $('cvLocal');
   if (local) { local.srcObject = stream; local.hidden = media !== 'video'; }
   $('cvVideoBtn').hidden = media !== 'video';
+  $('cvFlip').hidden = media !== 'video';
+  $('cvSpk').hidden = !$('cvRemote')?.setSinkId;
 }
 async function startCall(media) {
   if (!me || !db || !room) return;
@@ -5556,9 +5599,10 @@ async function startCall(media) {
   const peerId = roomOtherId;
   try {
     const stream = await getMedia(media);
+    await loadIce();
     const info = await callPeerInfo(peerId);
     call = { id: callId(), convId: room, peerId, media, role: 'caller', pc: null, stream, info, connected: false };
-    $('cvName').textContent = info.name; setAvatar($('cvAv'), info.avatar, info.name);
+    callSetPeer(info);
     attachLocal(stream, media);
     callUi('calling'); callStatus('Appel en cours…');
     startRing('back');
@@ -5568,7 +5612,7 @@ async function startCall(media) {
     await pc.setLocalDescription(offer);
     await callSignal('offer', { sdp: pc.localDescription.toJSON() });
     keepAwake();
-    callTimer = setTimeout(() => { if (call && !call.connected) endCall('Pas de réponse', true); }, 45000);
+    callTimer = setTimeout(() => { if (call && !call.connected) endCall(call.pc?.remoteDescription ? 'Connexion impossible (réseau). Un serveur TURN est nécessaire.' : 'Pas de réponse', true); }, 45000);
   } catch (error) {
     errorMessage(error);
     endCall('', false);
@@ -5580,6 +5624,7 @@ async function acceptCall() {
   stopRing();
   try {
     const stream = await getMedia(row.media === 'video' ? 'video' : 'audio');
+    await loadIce();
     const info = await callPeerInfo(row.from_id);
     call = { id: row.call_id, convId: row.conversation_id, peerId: row.from_id, media: row.media === 'video' ? 'video' : 'audio', role: 'callee', pc: null, stream, info, connected: false };
     incomingRow = null;
@@ -5594,7 +5639,7 @@ async function acceptCall() {
     await pc.setLocalDescription(answer);
     await callSignal('answer', { sdp: pc.localDescription.toJSON() });
     keepAwake();
-    callTimer = setTimeout(() => { if (call && !call.connected) endCall('Connexion impossible', true); }, 30000);
+    callTimer = setTimeout(() => { if (call && !call.connected) endCall('Connexion impossible (réseau). Un serveur TURN est nécessaire.', true); }, 30000);
   } catch (error) {
     errorMessage(error);
     if (incomingRow) { await callSignal('reject').catch(() => {}); }
@@ -5661,7 +5706,7 @@ async function handleSignal(row) {
     }
     incomingRow = row;
     const info = await callPeerInfo(row.from_id);
-    $('cvName').textContent = info.name; setAvatar($('cvAv'), info.avatar, info.name);
+    callSetPeer(info);
     $('cvLocal').hidden = true;
     callUi('incoming');
     callStatus(row.media === 'video' ? 'Appel vidéo entrant' : 'Appel vocal entrant');
@@ -5714,6 +5759,7 @@ function startCallChannel() {
       payload => handleSignal(payload.new).catch(() => {}))
     .subscribe();
   checkPendingCalls();
+  loadIce();
 }
 function stopCallChannel() {
   if (callChannel && db) db.removeChannel(callChannel);
@@ -5731,6 +5777,33 @@ $('cvMute')?.addEventListener('click', () => {
   track.enabled = !track.enabled;
   $('cvMute').classList.toggle('off', !track.enabled);
 });
+$('cvFlip')?.addEventListener('click', async () => {
+  if (!call || call.media !== 'video') return;
+  try {
+    call.facing = call.facing === 'environment' ? 'user' : 'environment';
+    const fresh = await navigator.mediaDevices.getUserMedia({ video: { facingMode: call.facing } });
+    const track = fresh.getVideoTracks()[0];
+    const sender = call.pc.getSenders().find(item => item.track && item.track.kind === 'video');
+    if (sender) await sender.replaceTrack(track);
+    call.stream.getVideoTracks().forEach(old => { old.stop(); call.stream.removeTrack(old); });
+    call.stream.addTrack(track);
+    $('cvLocal').srcObject = call.stream;
+    $('cvLocal').style.transform = call.facing === 'user' ? 'scaleX(-1)' : 'none';
+  } catch (error) { errorMessage(error); }
+});
+$('cvSpk')?.addEventListener('click', async () => {
+  const remote = $('cvRemote');
+  if (!remote?.setSinkId) return;
+  try {
+    call.speaker = !call.speaker;
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const out = devices.filter(d => d.kind === 'audiooutput');
+    const pick = call.speaker ? (out.find(d => /speaker|haut/i.test(d.label)) || out[0]) : (out.find(d => /ear|écouteur|handset/i.test(d.label)) || out[0]);
+    if (pick) await remote.setSinkId(pick.deviceId);
+    $('cvSpk').classList.toggle('on', Boolean(call.speaker));
+  } catch (error) { /* non pris en charge */ }
+});
+$('callView')?.addEventListener('click', () => { const remote = $('cvRemote'); if (remote && remote.paused && remote.srcObject) remote.play().catch(() => {}); });
 $('cvVideoBtn')?.addEventListener('click', () => {
   const track = call?.stream?.getVideoTracks()[0];
   if (!track) return;
