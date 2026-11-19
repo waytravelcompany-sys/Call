@@ -542,6 +542,7 @@ function handlePendingRoom() {
 navigator.serviceWorker?.addEventListener('message', event => {
   if (event.data?.type === 'open-room' && me && event.data.id) {
     openRoom(event.data.id).catch(errorMessage);
+    setTimeout(checkPendingCalls, 600);
   }
 });
 function renderAuth() {
@@ -4137,7 +4138,7 @@ function openAboutSheet() {
     });
     body.append(list);
     body.append(scopeNote('Pour une application, une affiche ou un site : contactez-moi.'));
-    body.append(scopeNote('Version de l’application : v17 (19/11/2026)'));
+    body.append(scopeNote('Version de l’application : v18 (19/11/2026)'));
     body.append(optRow('Appeler ' + ABOUT_PHONE, '›', () => { location.href = 'tel:' + ABOUT_TEL; }));
     body.append(optRow('WhatsApp ' + ABOUT_PHONE, '›', () => {
       window.open('https://wa.me/' + ABOUT_TEL.replace('+', ''), '_blank', 'noopener');
@@ -5397,6 +5398,16 @@ function openSoundsSheet() {
         }, { selected: prefs.sound[kind] === id }));
       });
     });
+    body.append(mk('h4', 'opt-sub', 'Sonnerie des appels'));
+    Object.entries(RINGS).forEach(([id, ring]) => {
+      body.append(optRow(ring.name, '', () => {
+        prefs.sound.ring = id;
+        savePrefs();
+        startRing('preview', id);
+        setTimeout(stopRing, 3000);
+        openSoundsSheet();
+      }, { selected: (prefs.sound.ring || 'classique') === id }));
+    });
     body.append(optRow('Vibration', prefs.sound.vibrate !== false ? 'Oui' : 'Non', () => {
       prefs.sound.vibrate = prefs.sound.vibrate === false;
       savePrefs();
@@ -5404,6 +5415,329 @@ function openSoundsSheet() {
     }));
   });
 }
+/* =====================================================
+   APPELS VOIX / VIDÉO (WebRTC gratuit, signalisation via Supabase)
+===================================================== */
+const ICE_SERVERS = window.TRUE_CHAT_CONFIG?.iceServers || [
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+  { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turns:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' }
+];
+const RINGS = {
+  classique: { name: 'Classique', total: 3, notes: [[880, 0, 0.18], [1100, 0.2, 0.18], [880, 0.5, 0.18], [1100, 0.7, 0.18]] },
+  melodie: { name: 'Mélodie', total: 3, notes: [[523, 0, 0.25], [659, 0.25, 0.25], [784, 0.5, 0.25], [1047, 0.75, 0.5], [784, 1.4, 0.2], [659, 1.6, 0.2], [523, 1.8, 0.6]] },
+  marimba: { name: 'Marimba', total: 3, notes: [[659, 0, 0.22], [784, 0.22, 0.22], [880, 0.44, 0.22], [784, 0.66, 0.22], [659, 0.88, 0.22], [523, 1.1, 0.5], [659, 1.7, 0.22], [784, 1.92, 0.5]] },
+  retro: { name: 'Téléphone rétro', total: 2.6, notes: Array.from({ length: 12 }, (_, i) => [1300 + (i % 2) * 220, i * 0.065, 0.065]).concat(Array.from({ length: 12 }, (_, i) => [1300 + (i % 2) * 220, 0.9 + i * 0.065, 0.065])) }
+};
+const ringUrls = {};
+function ringWav(key, notes, total, sustain) {
+  if (ringUrls[key]) return ringUrls[key];
+  const rate = 22050, n = Math.ceil(total * rate), d = new Float32Array(n);
+  notes.forEach(([f, at, dur]) => {
+    const st = Math.floor(at * rate), len = Math.floor(dur * rate);
+    for (let i = 0; i < len && st + i < n; i++) {
+      const t = i / rate;
+      let env = sustain ? Math.min(1, t / 0.02, (dur - t) / 0.03) : Math.min(1, t / 0.01) * Math.exp(-3.2 * t / dur);
+      env = Math.max(0, env);
+      d[st + i] += (Math.sin(2 * Math.PI * f * t) * 0.55 + Math.sin(4 * Math.PI * f * t) * 0.18) * env * 0.85;
+    }
+  });
+  const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, d[i])) * 32767, true);
+  return (ringUrls[key] = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' })));
+}
+let ringEl = null, ringVib = null;
+const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
+function unlockRing() {
+  if (ringEl) return;
+  ringEl = new Audio();
+  ringEl.setAttribute('playsinline', '');
+  ringEl.src = SILENT_WAV;
+  ringEl.play().then(() => ringEl.pause()).catch(() => {});
+}
+['pointerdown', 'touchend', 'keydown'].forEach(name => document.addEventListener(name, unlockRing, { once: true, passive: true }));
+function startRing(kind, idOverride) {
+  stopRing();
+  if (!ringEl) unlockRing();
+  const id = idOverride || prefs.sound?.ring || 'classique';
+  const r = RINGS[id] || RINGS.classique;
+  const url = kind === 'in' || kind === 'preview'
+    ? ringWav('r-' + id, r.notes, r.total, false)
+    : ringWav('back', [[440, 0, 1.2], [480, 0, 1.2]], 4, true);
+  ringEl.src = url; ringEl.loop = true; ringEl.volume = 1;
+  ringEl.play().catch(() => {});
+  if (kind === 'in' && prefs.sound?.vibrate !== false && navigator.vibrate) {
+    navigator.vibrate([500, 300, 500]);
+    ringVib = setInterval(() => navigator.vibrate([500, 300, 500]), 2000);
+  }
+}
+function stopRing() {
+  try { if (ringEl) { ringEl.pause(); ringEl.loop = false; } } catch (error) { /* ignoré */ }
+  clearInterval(ringVib); ringVib = null;
+  try { navigator.vibrate?.(0); } catch (error) { /* ignoré */ }
+}
+
+let call = null;          // appel en cours
+let incomingRow = null;   // offre reçue, pas encore décrochée
+const earlyIce = {};      // candidats ICE reçus avant le décrochage
+const seenSig = new Set();
+let callChannel = null, callTimer = null, callTick = null, callWake = null;
+
+const callId = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
+function callUi(state) {
+  const view = $('callView');
+  if (!view) return;
+  view.hidden = !state;
+  document.body.classList.toggle('in-call', Boolean(state));
+  if (!state) return;
+  $('cvBarIn').hidden = state !== 'incoming';
+  $('cvBarCall').hidden = state === 'incoming';
+  view.classList.toggle('video', Boolean(call?.media === 'video' || incomingRow?.media === 'video'));
+}
+function callStatus(text) { const el = $('cvStatus'); if (el) el.textContent = text; }
+async function callPeerInfo(id) {
+  const row = chatRows.find(item => item.otherId === id);
+  if (row) return { name: row.name, avatar: row.avatarUrl };
+  try {
+    const { data } = await db.from('profiles').select('full_name, username, avatar_url').eq('id', id).maybeSingle();
+    return { name: data?.full_name || data?.username || 'Utilisateur', avatar: data?.avatar_url || '' };
+  } catch (error) { return { name: 'Utilisateur', avatar: '' }; }
+}
+async function callSignal(kind, payload, to) {
+  if (!db || !me || !(call || incomingRow)) return;
+  const base = call || { id: incomingRow.call_id, convId: incomingRow.conversation_id, peerId: incomingRow.from_id, media: incomingRow.media };
+  const { error } = await db.from('call_signals').insert({
+    call_id: base.id, conversation_id: base.convId, from_id: me.id, to_id: to || base.peerId,
+    kind, media: base.media, payload: payload || null
+  });
+  if (error) throw error;
+}
+function makePc() {
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  pc.onicecandidate = event => {
+    if (event.candidate) callSignal('ice', event.candidate.toJSON()).catch(() => {});
+  };
+  pc.ontrack = event => {
+    const remote = $('cvRemote');
+    if (remote && event.streams[0]) { remote.srcObject = event.streams[0]; remote.play?.().catch(() => {}); }
+  };
+  pc.onconnectionstatechange = () => {
+    if (!call || call.pc !== pc) return;
+    if (pc.connectionState === 'connected') callConnected();
+    else if (pc.connectionState === 'failed') endCall('Connexion perdue', true);
+    else if (pc.connectionState === 'disconnected') {
+      setTimeout(() => { if (call && call.pc === pc && pc.connectionState === 'disconnected') endCall('Connexion perdue', true); }, 8000);
+    }
+  };
+  return pc;
+}
+async function getMedia(media) {
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error('Appels non pris en charge sur ce navigateur.');
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: media === 'video' ? { facingMode: 'user' } : false });
+  } catch (error) {
+    throw new Error(media === 'video' ? 'Autorisez le micro et la caméra pour appeler.' : 'Autorisez le micro pour appeler.');
+  }
+}
+function attachLocal(stream, media) {
+  const local = $('cvLocal');
+  if (local) { local.srcObject = stream; local.hidden = media !== 'video'; }
+  $('cvVideoBtn').hidden = media !== 'video';
+}
+async function startCall(media) {
+  if (!me || !db || !room) return;
+  if (!roomOtherId) { notify('Les appels sont disponibles dans les discussions privées.'); return; }
+  if (call || incomingRow) { notify('Un appel est déjà en cours.'); return; }
+  if (!navigator.onLine) { notify('Pas de connexion.'); return; }
+  const peerId = roomOtherId;
+  try {
+    const stream = await getMedia(media);
+    const info = await callPeerInfo(peerId);
+    call = { id: callId(), convId: room, peerId, media, role: 'caller', pc: null, stream, info, connected: false };
+    $('cvName').textContent = info.name; setAvatar($('cvAv'), info.avatar, info.name);
+    attachLocal(stream, media);
+    callUi('calling'); callStatus('Appel en cours…');
+    startRing('back');
+    const pc = call.pc = makePc();
+    stream.getTracks().forEach(track => pc.addTrack(track, stream));
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await callSignal('offer', { sdp: pc.localDescription.toJSON() });
+    keepAwake();
+    callTimer = setTimeout(() => { if (call && !call.connected) endCall('Pas de réponse', true); }, 45000);
+  } catch (error) {
+    errorMessage(error);
+    endCall('', false);
+  }
+}
+async function acceptCall() {
+  if (!incomingRow) return;
+  const row = incomingRow;
+  stopRing();
+  try {
+    const stream = await getMedia(row.media === 'video' ? 'video' : 'audio');
+    const info = await callPeerInfo(row.from_id);
+    call = { id: row.call_id, convId: row.conversation_id, peerId: row.from_id, media: row.media === 'video' ? 'video' : 'audio', role: 'callee', pc: null, stream, info, connected: false };
+    incomingRow = null;
+    attachLocal(stream, call.media);
+    callUi('calling'); callStatus('Connexion…');
+    const pc = call.pc = makePc();
+    stream.getTracks().forEach(track => pc.addTrack(track, stream));
+    await pc.setRemoteDescription(row.payload.sdp);
+    for (const cand of (earlyIce[row.call_id] || [])) { try { await pc.addIceCandidate(cand); } catch (error) { /* ignoré */ } }
+    delete earlyIce[row.call_id];
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await callSignal('answer', { sdp: pc.localDescription.toJSON() });
+    keepAwake();
+    callTimer = setTimeout(() => { if (call && !call.connected) endCall('Connexion impossible', true); }, 30000);
+  } catch (error) {
+    errorMessage(error);
+    if (incomingRow) { await callSignal('reject').catch(() => {}); }
+    else if (call) { await callSignal('end').catch(() => {}); }
+    cleanupCall();
+  }
+}
+async function declineCall() {
+  if (!incomingRow) return;
+  stopRing();
+  await callSignal('reject').catch(() => {});
+  const id = incomingRow.call_id;
+  incomingRow = null;
+  delete earlyIce[id];
+  callUi(null);
+}
+function callConnected() {
+  if (!call || call.connected) return;
+  call.connected = true;
+  clearTimeout(callTimer);
+  stopRing();
+  call.since = Date.now();
+  clearInterval(callTick);
+  callTick = setInterval(() => {
+    const s = Math.floor((Date.now() - call.since) / 1000);
+    callStatus(String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'));
+  }, 1000);
+  callStatus('00:00');
+  $('callView')?.classList.add('connected');
+}
+async function keepAwake() {
+  try { callWake = await navigator.wakeLock?.request('screen'); } catch (error) { /* ignoré */ }
+}
+function cleanupCall() {
+  stopRing();
+  clearTimeout(callTimer); clearInterval(callTick);
+  try { call?.stream?.getTracks().forEach(track => track.stop()); } catch (error) { /* ignoré */ }
+  try { call?.pc?.close(); } catch (error) { /* ignoré */ }
+  try { callWake?.release(); } catch (error) { /* ignoré */ }
+  callWake = null;
+  const id = call?.id;
+  call = null;
+  const remote = $('cvRemote'); if (remote) remote.srcObject = null;
+  const local = $('cvLocal'); if (local) local.srcObject = null;
+  $('callView')?.classList.remove('connected');
+  callUi(null);
+  if (id && db && me) db.from('call_signals').delete().eq('call_id', id).then(() => {}, () => {});
+}
+async function endCall(reason, notifyPeer) {
+  if (notifyPeer && call) await callSignal('end').catch(() => {});
+  const wasConnected = Boolean(call?.connected);
+  const text = reason || (wasConnected ? 'Appel terminé' : '');
+  cleanupCall();
+  if (text) notify(text);
+}
+async function handleSignal(row) {
+  if (!row || seenSig.has(row.id)) return;
+  seenSig.add(row.id);
+  if (row.kind === 'offer') {
+    if (Date.now() - Date.parse(row.created_at) > 60000) return;
+    if (call || incomingRow) {
+      await db.from('call_signals').insert({ call_id: row.call_id, conversation_id: row.conversation_id, from_id: me.id, to_id: row.from_id, kind: 'busy', media: row.media }).then(() => {}, () => {});
+      return;
+    }
+    incomingRow = row;
+    const info = await callPeerInfo(row.from_id);
+    $('cvName').textContent = info.name; setAvatar($('cvAv'), info.avatar, info.name);
+    $('cvLocal').hidden = true;
+    callUi('incoming');
+    callStatus(row.media === 'video' ? 'Appel vidéo entrant' : 'Appel vocal entrant');
+    startRing('in');
+    if (document.hidden) systemNotify(info.name, row.media === 'video' ? 'Appel vidéo entrant' : 'Appel vocal entrant', row.conversation_id, info.avatar);
+    return;
+  }
+  if (row.kind === 'ice') {
+    if (call && call.id === row.call_id && call.pc) {
+      if (call.pc.remoteDescription) { try { await call.pc.addIceCandidate(row.payload); } catch (error) { /* ignoré */ } }
+      else (earlyIce[row.call_id] ||= []).push(row.payload);
+    } else (earlyIce[row.call_id] ||= []).push(row.payload);
+    return;
+  }
+  if (row.kind === 'answer') {
+    if (call && call.id === row.call_id && call.role === 'caller' && call.pc && !call.pc.remoteDescription) {
+      stopRing();
+      callStatus('Connexion…');
+      await call.pc.setRemoteDescription(row.payload.sdp);
+      for (const cand of (earlyIce[row.call_id] || [])) { try { await call.pc.addIceCandidate(cand); } catch (error) { /* ignoré */ } }
+      delete earlyIce[row.call_id];
+    }
+    return;
+  }
+  // end / reject / busy
+  if (incomingRow && incomingRow.call_id === row.call_id) {
+    stopRing(); incomingRow = null; callUi(null);
+    notify('Appel manqué');
+  } else if (call && call.id === row.call_id) {
+    endCall(row.kind === 'reject' ? 'Appel refusé' : row.kind === 'busy' ? 'Occupé' : 'Appel terminé', false);
+  }
+}
+async function checkPendingCalls() {
+  if (!db || !me || call || incomingRow || !navigator.onLine) return;
+  try {
+    const since = new Date(Date.now() - 60000).toISOString();
+    const { data } = await db.from('call_signals').select('*').eq('to_id', me.id).gt('created_at', since).order('id', { ascending: true });
+    const rows = data || [];
+    const ended = new Set(rows.filter(r => ['end', 'reject', 'busy'].includes(r.kind)).map(r => r.call_id));
+    for (const row of rows) {
+      if (row.kind === 'offer' && ended.has(row.call_id)) continue;
+      if (row.kind === 'offer' || row.kind === 'ice') await handleSignal(row);
+    }
+  } catch (error) { /* table absente : SETUP-APPELS.sql pas encore exécuté */ }
+}
+function startCallChannel() {
+  if (callChannel || !db || !me) return;
+  callChannel = db.channel('calls-' + me.id)
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'call_signals', filter: 'to_id=eq.' + me.id },
+      payload => handleSignal(payload.new).catch(() => {}))
+    .subscribe();
+  checkPendingCalls();
+}
+function stopCallChannel() {
+  if (callChannel && db) db.removeChannel(callChannel);
+  callChannel = null;
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkPendingCalls(); });
+$('callVoice')?.addEventListener('click', () => startCall('audio'));
+$('callVideo')?.addEventListener('click', () => startCall('video'));
+$('cvAccept')?.addEventListener('click', acceptCall);
+$('cvDecline')?.addEventListener('click', declineCall);
+$('cvHang')?.addEventListener('click', () => endCall('', true));
+$('cvMute')?.addEventListener('click', () => {
+  const track = call?.stream?.getAudioTracks()[0];
+  if (!track) return;
+  track.enabled = !track.enabled;
+  $('cvMute').classList.toggle('off', !track.enabled);
+});
+$('cvVideoBtn')?.addEventListener('click', () => {
+  const track = call?.stream?.getVideoTracks()[0];
+  if (!track) return;
+  track.enabled = !track.enabled;
+  $('cvVideoBtn').classList.toggle('off', !track.enabled);
+});
+
 let inboxChannel = null;
 let inboxTimer = null;
 function startInbox() {
@@ -5413,10 +5747,12 @@ function startInbox() {
       payload => onIncoming(payload.new))
     .subscribe();
   setTimeout(askNotificationOnce, 2500);
+  startCallChannel();
   startPresence();
 }
 function stopInbox() {
   stopPresence();
+  stopCallChannel();
   if (inboxChannel && db) db.removeChannel(inboxChannel);
   inboxChannel = null;
 }
