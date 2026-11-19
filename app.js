@@ -1609,7 +1609,8 @@ function showPhoto(url, label, source) {
   close.setAttribute('aria-label', 'Fermer');
   close.textContent = '✕';
   view.append(img, caption, close);
-  view.addEventListener('click', () => closePhoto());
+  enableZoom(img);
+  view.addEventListener('click', event => { if (event.target === img) return; closePhoto(); });
   document.body.append(view);
   if (source) {
     const run = () => {
@@ -1686,6 +1687,139 @@ $('roomAvatar')?.addEventListener('click', () => {
   openRoomProfile();
 });
 document.querySelector('.room-bar .room-title')?.addEventListener('click', openRoomProfile);
+
+function openMediaComposer(file) {
+  $('mediaComposer')?.remove();
+  const isImg = file.type.startsWith('image/');
+  const isVid = file.type.startsWith('video/');
+  if (!isImg && !isVid) return false;
+  const url = URL.createObjectURL(file);
+  const ov = mk('div', 'mc'); ov.id = 'mediaComposer';
+  const stage = mk('div', 'mc-stage');
+  const media = document.createElement(isImg ? 'img' : 'video');
+  media.className = 'mc-media'; media.src = url;
+  if (isVid) { media.controls = true; media.playsInline = true; }
+  const tag = mk('div', 'mc-text'); tag.hidden = true;
+  const tin = document.createElement('input'); tin.className = 'mc-tin'; tin.hidden = true; tin.placeholder = 'Votre texte…';
+  stage.append(media, tag, tin);
+  const top = mk('div', 'mc-top');
+  const x = mk('button', 'mc-x', '✕'); x.type = 'button'; x.setAttribute('aria-label', 'Annuler');
+  const tbtn = mk('button', 'mc-t', 'Aa Texte'); tbtn.type = 'button'; tbtn.hidden = !isImg;
+  top.append(x, tbtn);
+  const bar = mk('div', 'mc-bar');
+  const cap = document.createElement('input'); cap.className = 'mc-cap'; cap.placeholder = 'Ajouter une légende…'; cap.value = $('messageText')?.value || '';
+  const send = mk('button', 'mc-send', '➤'); send.type = 'button'; send.setAttribute('aria-label', 'Envoyer');
+  bar.append(cap, send);
+  ov.append(top, stage, bar);
+  document.body.append(ov);
+  const colors = ['#ffffff', '#ffd54a', '#ff5a5a', '#4dd0ff', '#6dff8a'];
+  let ci = 0;
+  const close = cancel => {
+    ov.remove(); URL.revokeObjectURL(url);
+    if (cancel) {
+      selectedMedia = null;
+      ['attachment', 'cameraInput'].forEach(id => { if ($(id)) $(id).value = ''; });
+      setText('selectedFile', '');
+      updateComposerMode();
+    }
+  };
+  x.onclick = () => close(true);
+  tbtn.onclick = () => { tin.hidden = false; tin.value = tag.textContent; tin.focus(); };
+  const commit = () => { tag.textContent = tin.value; tag.hidden = !tin.value.trim(); tin.hidden = true; };
+  tin.onblur = commit;
+  tin.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); tin.blur(); } };
+  // glisser le texte ; un simple appui change la couleur
+  let drag = null;
+  tag.addEventListener('pointerdown', event => {
+    tag.setPointerCapture(event.pointerId);
+    const r = tag.getBoundingClientRect();
+    drag = { dx: event.clientX - (r.left + r.width / 2), dy: event.clientY - (r.top + r.height / 2), moved: false };
+  });
+  tag.addEventListener('pointermove', event => {
+    if (!drag) return;
+    const sr = stage.getBoundingClientRect();
+    const nx = event.clientX - drag.dx - sr.left, ny = event.clientY - drag.dy - sr.top;
+    if (Math.abs(nx - tag.offsetLeft) + Math.abs(ny - tag.offsetTop) > 4) drag.moved = true;
+    tag.style.left = nx + 'px'; tag.style.top = ny + 'px';
+  });
+  tag.addEventListener('pointerup', () => {
+    if (drag && !drag.moved) { ci = (ci + 1) % colors.length; tag.style.color = colors[ci]; }
+    drag = null;
+  });
+  const bake = async () => {
+    if (!isImg || tag.hidden || !tag.textContent.trim()) return file;
+    let bmp;
+    try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
+    catch (error) { bmp = media; }
+    const w0 = bmp.width || media.naturalWidth, h0 = bmp.height || media.naturalHeight;
+    const k = Math.min(1, 2048 / Math.max(w0, h0));
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(w0 * k); cv.height = Math.round(h0 * k);
+    const ctx = cv.getContext('2d');
+    ctx.drawImage(bmp, 0, 0, cv.width, cv.height);
+    const mr = media.getBoundingClientRect(), tr = tag.getBoundingClientRect();
+    const cx = ((tr.left + tr.width / 2) - mr.left) / mr.width * cv.width;
+    const cy = ((tr.top + tr.height / 2) - mr.top) / mr.height * cv.height;
+    const fpx = parseFloat(getComputedStyle(tag).fontSize) / mr.width * cv.width;
+    ctx.font = '800 ' + fpx + 'px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round'; ctx.lineWidth = fpx / 5; ctx.strokeStyle = 'rgba(0,0,0,.75)'; ctx.fillStyle = colors[ci];
+    const lines = tag.textContent.split('\n');
+    lines.forEach((line, i) => {
+      const y = cy + (i - (lines.length - 1) / 2) * fpx * 1.15;
+      ctx.strokeText(line, cx, y); ctx.fillText(line, cx, y);
+    });
+    const blob = await new Promise(resolve => cv.toBlob(resolve, 'image/jpeg', 0.9));
+    if (!blob) return file;
+    return new File([blob], (file.name || 'photo').replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' });
+  };
+  send.onclick = async () => {
+    send.disabled = true;
+    try {
+      if (!tin.hidden) commit();
+      selectedMedia = await bake();
+      $('messageText').value = cap.value.trim();
+      close(false);
+      const form = $('sendForm');
+      if (form.requestSubmit) form.requestSubmit(); else form.dispatchEvent(new Event('submit', { cancelable: true }));
+    } catch (error) { errorMessage(error); send.disabled = false; }
+  };
+  return true;
+}
+function enableZoom(img) {
+  let s = 1, tx = 0, ty = 0, d0 = 0, s0 = 1;
+  const pts = new Map();
+  img.style.touchAction = 'none';
+  const apply = () => { img.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + s + ')'; };
+  const reset = () => { s = 1; tx = 0; ty = 0; apply(); };
+  img.addEventListener('pointerdown', event => {
+    event.stopPropagation();
+    try { img.setPointerCapture(event.pointerId); } catch (error) { /* ignoré */ }
+    pts.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pts.size === 2) { const [a, b] = [...pts.values()]; d0 = Math.hypot(a.x - b.x, a.y - b.y) || 1; s0 = s; }
+  });
+  img.addEventListener('pointermove', event => {
+    const p = pts.get(event.pointerId);
+    if (!p) return;
+    const dx = event.clientX - p.x, dy = event.clientY - p.y;
+    p.x = event.clientX; p.y = event.clientY;
+    if (pts.size >= 2) {
+      const [a, b] = [...pts.values()];
+      s = Math.min(6, Math.max(1, s0 * Math.hypot(a.x - b.x, a.y - b.y) / d0));
+      apply();
+    } else if (s > 1) { tx += dx; ty += dy; apply(); }
+  });
+  const up = event => { pts.delete(event.pointerId); if (s < 1.03) reset(); };
+  img.addEventListener('pointerup', up);
+  img.addEventListener('pointercancel', up);
+  img.addEventListener('dblclick', event => { event.stopPropagation(); if (s > 1) reset(); else { s = 2.5; apply(); } });
+  img.addEventListener('wheel', event => {
+    event.preventDefault();
+    s = Math.min(6, Math.max(1, s * (event.deltaY < 0 ? 1.15 : 0.87)));
+    if (s === 1) { tx = 0; ty = 0; }
+    apply();
+  }, { passive: false });
+}
 /* =====================================================
    ENVOI DE MESSAGES ET DE MÉDIAS
 ===================================================== */
@@ -1697,6 +1831,7 @@ $('attachment')?.addEventListener('change', () => {
       ? selectedMedia.name + ' — prêt à être envoyé avec votre message'
       : '';
   }
+  if (selectedMedia && /^(image|video)\//.test(selectedMedia.type)) openMediaComposer(selectedMedia);
 });
 $('sendForm')?.addEventListener('submit', async event => {
   event.preventDefault();
@@ -1864,6 +1999,7 @@ $('cameraInput')?.addEventListener('change', () => {
     ? selectedMedia.name + ' — prêt à être envoyé avec votre message'
     : '');
   updateComposerMode();
+  if (selectedMedia && /^(image|video)\//.test(selectedMedia.type)) openMediaComposer(selectedMedia);
 });
 
 // iPhone/Safari enregistre en MP4 (AAC) ; on le préfère car il se lit partout.
@@ -4001,6 +4137,7 @@ function openAboutSheet() {
     });
     body.append(list);
     body.append(scopeNote('Pour une application, une affiche ou un site : contactez-moi.'));
+    body.append(scopeNote('Version de l’application : v17 (19/11/2026)'));
     body.append(optRow('Appeler ' + ABOUT_PHONE, '›', () => { location.href = 'tel:' + ABOUT_TEL; }));
     body.append(optRow('WhatsApp ' + ABOUT_PHONE, '›', () => {
       window.open('https://wa.me/' + ABOUT_TEL.replace('+', ''), '_blank', 'noopener');
@@ -5343,15 +5480,15 @@ function onIncoming(message) {
   const alertTitle = row?.name || 'Nouveau message';
   const alertBody = advFor(message.conversation_id) ? 'Message masqué' : (previewOf(message).text || 'Nouveau message');
   messageAlert(row?.isGroup ? 'group' : 'person');
-  if (document.hidden) systemNotify(alertTitle, alertBody, message.conversation_id);
+  if (document.hidden) systemNotify(alertTitle, alertBody, message.conversation_id, row?.avatarUrl || '');
   else showBanner(alertTitle, alertBody, message.conversation_id, row?.avatarUrl || '');
 }
 // Notification système (bannière + son du téléphone) quand l'app est en arrière-plan
-async function systemNotify(title, body, roomId) {
+async function systemNotify(title, body, roomId, iconUrl) {
   try {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
     const options = {
-      body, icon: './icon-192.png', badge: './icon-192.png', tag: 'room-' + roomId,
+      body, icon: iconUrl || './icon-192.png', badge: './icon-192.png', tag: 'room-' + roomId,
       renotify: true, vibrate: [120, 60, 120], silent: false, data: { conversation_id: roomId }
     };
     const reg = await navigator.serviceWorker?.getRegistration();
@@ -5360,11 +5497,13 @@ async function systemNotify(title, body, roomId) {
 }
 function askNotificationOnce() {
   try {
-    if (!('Notification' in window) || Notification.permission !== 'default' || localStorage.getItem('truechat.notifAsked')) return;
+    if (!('Notification' in window) || Notification.permission !== 'default') return;
+    const last = Number(localStorage.getItem('truechat.notifAsked') || 0);
+    if (Date.now() - last < 12 * 3600 * 1000) return;   // redemande toutes les 12 h tant que ce n'est pas autorisé
   } catch (error) { return; }
   const handler = async () => {
     document.removeEventListener('pointerup', handler, true);
-    try { localStorage.setItem('truechat.notifAsked', '1'); } catch (error) { /* ignoré */ }
+    try { localStorage.setItem('truechat.notifAsked', String(Date.now())); } catch (error) { /* ignoré */ }
     if (await glassConfirm('Recevez une notification avec un son à chaque nouveau message.', 'Autoriser', 'Activer les notifications ?')) enablePush();
   };
   document.addEventListener('pointerup', handler, true);

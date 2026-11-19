@@ -1,5 +1,5 @@
 /* TRUE CHAT — service worker : installation PWA, mode hors-ligne et notifications push */
-const CACHE = 'truechat-shell-v15';
+const CACHE = 'truechat-shell-v17';
 const CDN_CACHE = 'truechat-cdn-v1';
 const IMG_CACHE = 'truechat-img-v1';
 const SHELL = [
@@ -157,7 +157,7 @@ self.addEventListener('push', event => {
   event.waitUntil(
     self.registration.showNotification(title, {
       body: data.body || 'Nouveau message',
-      icon: './icon-192.png',
+      icon: data.icon || './icon-192.png',
       badge: './icon-192.png',
       tag: data.tag || data.conversation_id || 'truechat',
       renotify: true,
