@@ -4138,7 +4138,7 @@ function openAboutSheet() {
     });
     body.append(list);
     body.append(scopeNote('Pour une application, une affiche ou un site : contactez-moi.'));
-    body.append(scopeNote('Version de l’application : v19 (20/11/2026)'));
+    body.append(scopeNote('Version de l’application : v20 (20/11/2026)'));
     body.append(optRow('Appeler ' + ABOUT_PHONE, '›', () => { location.href = 'tel:' + ABOUT_TEL; }));
     body.append(optRow('WhatsApp ' + ABOUT_PHONE, '›', () => {
       window.open('https://wa.me/' + ABOUT_TEL.replace('+', ''), '_blank', 'noopener');
@@ -5434,7 +5434,11 @@ async function loadIce() {
       new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000))
     ]);
     const list = result?.data?.iceServers;
-    if (Array.isArray(list) && list.length) { iceServers = list; iceLoadedAt = Date.now(); }
+    if (Array.isArray(list) && list.length) {
+      const hasTurn = list.some(item => [].concat(item.urls || []).some(u => /^turns?:/.test(u)));
+      iceServers = hasTurn ? list : list.concat(DEFAULT_ICE.filter(item => [].concat(item.urls || []).some(u => /^turns?:/.test(u))));
+      if (hasTurn) iceLoadedAt = Date.now();   // sinon on réessaie à l'appel suivant (Metered met ~2 min à activer)
+    }
   } catch (error) { /* on garde les serveurs par défaut */ }
 }
 const RINGS = {
